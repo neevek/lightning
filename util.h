@@ -1,3 +1,6 @@
+#ifndef UTIL_H_
+#define UTIL_H_
+
 #include <stdlib.h>
 
 #define container_of(ptr, type, field) \
@@ -12,3 +15,4 @@ do { \
   } \
 } while (0)
 
+#endif /* end of include guard: UTIL_H_ */

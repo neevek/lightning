@@ -1,5 +1,6 @@
 #ifndef LOG_H_
 #define LOG_H_
+#include <stdio.h>
 #include <string.h>
 #include <stdarg.h>    // for va_list, va_start and va_end
 #include <sys/time.h>
