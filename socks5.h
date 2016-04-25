@@ -25,9 +25,9 @@ typedef enum {
 } Socks5Atyp;
 
 typedef enum {
-  S5_AUTH_NONE = 0,
-  S5_AUTH_GSSAPI = 1,
-  S5_AUTH_PASSWD = 2
+  S5_AUTH_NONE =   1 << 0,
+  S5_AUTH_GSSAPI = 1 << 1,
+  S5_AUTH_PASSWD = 1 << 2
 } Socks5AuthMethod;
 
 typedef enum {
