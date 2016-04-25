@@ -31,12 +31,12 @@ typedef enum {
 } Socks5AuthMethod;
 
 typedef enum {
-  S5_BAD_VERSION = -5,
-  S5_JUNK_DATA_IN_HANDSHAKE = -4,
-  S5_JUN_DATA_IN_REQUEST = -3,
-  S5_UNSUPPORTED_CMD = -2,
-  S5_BAD_ATYP = -1,
   S5_OK = 0,
+  S5_BAD_VERSION = 1,
+  S5_JUNK_DATA_IN_HANDSHAKE = 2,
+  S5_JUN_DATA_IN_REQUEST = 3,
+  S5_UNSUPPORTED_CMD = 4,
+  S5_BAD_ATYP = 5,
 } S5Err;
 
 typedef struct {

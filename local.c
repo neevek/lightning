@@ -76,6 +76,8 @@ static void close_session(Session *sess);
 
 static int client_read_start(uv_stream_t *handle);
 static int client_write_start(uv_stream_t *handle, const uv_buf_t *buf);
+static int client_write_string(uv_stream_t *handle, const char *data);
+static int client_write_error(uv_stream_t *handle, int uv_err);
 static void on_client_conn_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf);
 static void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf);
 static void on_client_write_done(uv_write_t *req, int status);
@@ -232,9 +234,53 @@ int client_read_start(uv_stream_t *handle) {
   int err;
   if ((err = uv_read_start(handle, on_client_conn_alloc, on_client_read_done)) != 0) {
     LOG_E("uv_read_start failed: %s", uv_strerror(err));
+    // safe to close directly
     close_session(sess);
   }
   return err;
+}
+
+int client_write_error(uv_stream_t *handle, int uv_err) {
+  Session *sess = container_of(handle, Session, client_tcp);
+
+  char buf[] = { 5, 1, 0, 1, 0, 0, 0, 0, 0, 0, '\0' };
+  sess->state = END; // cause the session be closed in on_write_done_cb
+
+  switch(uv_err) {
+    case UV_ENETUNREACH:
+      buf[1] = 3; // from the RFC: 3 = Network unreachable
+      break;
+    case UV_EHOSTUNREACH:
+      buf[1] = 4; // from the RFC: 4 = Host unreachable
+      sess->state = END;
+      break;
+    case UV_ECONNREFUSED:
+      buf[1] = 5;
+      sess->state = END;
+      break;
+
+    case S5_UNSUPPORTED_CMD:
+      buf[1] = 7;
+      sess->state = END;
+      break;
+    case S5_BAD_ATYP:
+      buf[1] = 8;
+      sess->state = END;
+      break;
+    default:
+      buf[1] = 1; // general SOCKS server failure
+      sess->state = END;
+      break;
+  }
+
+  return client_write_string(handle, buf);
+}
+
+int client_write_string(uv_stream_t *handle, const char *data) {
+  uv_buf_t buf;
+  buf.base = (char *)data;
+  buf.len = strlen(data);
+  return client_write_start(handle, &buf);
 }
 
 int client_write_start(uv_stream_t *handle, const uv_buf_t *buf) {
@@ -242,6 +288,7 @@ int client_write_start(uv_stream_t *handle, const uv_buf_t *buf) {
   int err;
   if ((err = uv_write(&sess->client_write_req, (uv_stream_t *)handle, buf, 1, on_client_write_done)) != 0) {
     LOG_E("uv_write failed: %s", uv_strerror(err));
+    // safe to close directly
     close_session(sess);
   }
   return err;
@@ -252,7 +299,7 @@ int upstream_read_start(uv_stream_t *handle) {
   int err;
   if ((err = uv_read_start(handle, on_upstream_conn_alloc, on_upstream_read_done)) != 0) {
     LOG_E("uv_read_start failed: %s", uv_strerror(err));
-    close_session(sess);
+    client_write_error((uv_stream_t *)&sess->client_tcp, err);
   }
   return err;
 }
@@ -262,7 +309,7 @@ int upstream_write_start(uv_stream_t *handle, const uv_buf_t *buf) {
   int err;
   if ((err = uv_write(&sess->upstream_write_req, (uv_stream_t *)handle, buf, 1, on_upstream_write_done)) != 0) {
     LOG_E("uv_write failed: %s", uv_strerror(err));
-    close_session(sess);
+    client_write_error((uv_stream_t *)&sess->client_tcp, err);
   }
   return err;
 }
@@ -280,27 +327,26 @@ void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf
     return;
   }
 
-  if (sess->state == HANDSHAKE) {
-    uv_read_stop(handle);
+  // stop reading before processing the data
+  uv_read_stop(handle);
 
+  if (sess->state == HANDSHAKE) {
     S5Err s5_err = socks5_parse_handshake(&sess->socks5_ctx, buf->base, nread);
     if (s5_err != S5_OK) {
       LOG_E("parse handshake failed");
+      // not an understandable socks handshake message, close the session directly
       close_session(sess);
       return;
     }
 
     if (sess->socks5_ctx.state == S5_PARSE_STATE_FINISH) {
-      buf->base[0] = SOCKS5_VERSION;
       if ((sess->socks5_ctx.methods & S5_AUTH_NONE) != 0) { // we only support AUTH_NONE at the moment
-        buf->base[1] = 0;
         sess->state = REQ;
+        client_write_string(handle, "\5\0");
       } else {
-        buf->base[1] = 0xff;
-        sess->state = END;
+        sess->state = END;  // cause the session be closed in on_write_done_cb
+        client_write_string(handle, "\5\xff");
       }
-      ((uv_buf_t *)buf)->len = 2; // safe to cast away constness here because uv_write is synchronous
-      client_write_start(handle, buf);
 
       LOG_V("handshake passed");
     } else {
@@ -309,15 +355,12 @@ void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf
     }
 
   } else if (sess->state == REQ) {
-    uv_read_stop(handle);
-
     S5Err s5_err = socks5_parse_req(&sess->socks5_ctx, buf->base, nread); 
     if (s5_err != S5_OK) {
       LOG_E("parsed req failed");
-      close_session(sess);
+      client_write_error(handle, s5_err);
       return;
     }
-
 
     if (sess->socks5_ctx.atyp == S5_ATYP_IPV4) {
       struct sockaddr_in addr4;
@@ -329,7 +372,7 @@ void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf
       if ((err = upstream_connect(&sess->upstream_connect_req, &sess->upstream_tcp, 
               (IPAddr *)&addr4)) != 0) {
         LOG_E("upstream_connect failed: %s", uv_strerror(err));
-        close_session(sess);
+        client_write_error(handle, err);
         return;
       }
 
@@ -349,13 +392,9 @@ void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf
             (const char *)sess->socks5_ctx.dst_addr, 
             NULL, 
             &hint)) != 0) {
-        LOG_E("connecting to upstream failed: %s", uv_strerror(err));
 
-        sess->state = END;
-        // Host unreachable
-        ((uv_buf_t *)buf)->len = 10;
-        memcpy(buf->base, "\5\4\0\1\0\0\0\0\0\0", 10);
-        client_write_start(handle, buf);
+        LOG_E("connecting to upstream failed: %s", uv_strerror(err));
+        client_write_error(handle, err);
         return;
       }
 
@@ -371,7 +410,7 @@ void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf
       if ((err = upstream_connect(&sess->upstream_connect_req, &sess->upstream_tcp, 
               (IPAddr *)&addr6)) != 0) {
         LOG_E("upstream_connect failed: %s", uv_strerror(err));
-        close_session(sess);
+        client_write_error(handle, err);
         return;
       }
 
@@ -381,10 +420,11 @@ void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf
     }
 
   } else if (sess->state == STREAMING) { 
-    uv_read_stop(handle);
-
     ((uv_buf_t *)buf)->len = nread;
     upstream_write_start((uv_stream_t *)&sess->upstream_tcp, buf);
+
+  } else {
+    LOG_W("unepxected state: %d", sess->state);
   }
 }
 
@@ -409,7 +449,8 @@ void on_upstream_conn_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
 void on_upstream_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf) {
   Session *sess = container_of(handle, Session, upstream_tcp);
   if (nread < 0) {
-    close_session(sess);
+    LOG_V("upstream read failed: %s", uv_strerror(nread));
+    client_write_error((uv_stream_t *)&sess->client_tcp, nread);
     return;
   }
 
@@ -422,8 +463,8 @@ void on_upstream_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *b
 void on_upstream_write_done(uv_write_t *req, int status) {
   Session *sess = container_of(req, Session, upstream_write_req);
   if (status < 0) {
-    LOG_V("write failed: %s", uv_strerror(status));
-    close_session(sess);
+    LOG_V("upstream write failed: %s", uv_strerror(status));
+    client_write_error((uv_stream_t *)&sess->client_tcp, status);
   } else {
     client_read_start((uv_stream_t *)&sess->client_tcp);
   }
@@ -434,8 +475,8 @@ void upstream_connect_domain(uv_getaddrinfo_t* req, int status, struct addrinfo*
   if (status < 0) {
     LOG_E("getaddrinfo(\"%s\"): %s", sess->socks5_ctx.dst_addr, uv_strerror(status));
     uv_freeaddrinfo(res);
+    client_write_error((uv_stream_t *)&sess->client_tcp, status);
     close_session(sess);
-    // TODO return error to client
     return;
   }
 
@@ -482,15 +523,7 @@ void upstream_connect_cb(uv_connect_t* req, int status) {
     LOG_W("uv_tcp_connect failed on [%s]:%d, err: %s", 
         sess->socks5_ctx.dst_addr, sess->socks5_ctx.dst_port, uv_strerror(status));
 
-    sess->state = END;
-
-    uv_buf_t buf = {
-      .base = sess->client_buf,
-      .len = 10
-    };
-    // Host unreachable
-    memcpy(buf.base, "\5\4\0\1\0\0\0\0\0\0", 10);
-    client_write_start((uv_stream_t *)&sess->client_tcp, &buf);
+    client_write_error((uv_stream_t *)&sess->client_tcp, status); 
 
   } else {
     sess->state = STREAMING;
@@ -510,7 +543,6 @@ void upstream_connect_cb(uv_connect_t* req, int status) {
     }
 
     client_write_start((uv_stream_t *)&sess->client_tcp, &buf);
-    upstream_read_start((uv_stream_t *)&sess->upstream_tcp);
   }
 }
 
