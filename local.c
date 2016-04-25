@@ -322,12 +322,13 @@ void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf
     if (sess->socks5_ctx.atyp == S5_ATYP_IPV4) {
       struct sockaddr_in addr4;
       addr4.sin_family = AF_INET;
-      addr4.sin_port = sess->socks5_ctx.dst_port;
+      addr4.sin_port = htons(sess->socks5_ctx.dst_port);
       memcpy(&addr4.sin_addr.s_addr, sess->socks5_ctx.dst_addr, 4);
 
       int err;
       if ((err = upstream_connect(&sess->upstream_connect_req, &sess->upstream_tcp, 
               (IPAddr *)&addr4)) != 0) {
+        LOG_E("upstream_connect failed: %s", uv_strerror(err));
         close_session(sess);
         return;
       }
@@ -363,12 +364,13 @@ void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf
     } else if (sess->socks5_ctx.atyp == S5_ATYP_IPV6) {
       struct sockaddr_in6 addr6;
       addr6.sin6_family = AF_INET6;
-      addr6.sin6_port = sess->socks5_ctx.dst_port;
+      addr6.sin6_port = htons(sess->socks5_ctx.dst_port);
       memcpy(&addr6.sin6_addr.s6_addr, sess->socks5_ctx.dst_addr, 16);
 
       int err;
       if ((err = upstream_connect(&sess->upstream_connect_req, &sess->upstream_tcp, 
               (IPAddr *)&addr6)) != 0) {
+        LOG_E("upstream_connect failed: %s", uv_strerror(err));
         close_session(sess);
         return;
       }
@@ -437,14 +439,6 @@ void upstream_connect_domain(uv_getaddrinfo_t* req, int status, struct addrinfo*
     return;
   }
 
-  int err;
-  if ((err = uv_tcp_init(g_loop, &sess->upstream_tcp)) < 0) {
-    LOG_E("uv_tcp_init failed: %s", uv_strerror(status));
-    close_session(sess);
-    // TODO return error to client
-    return;
-  }
-
   char ipstr[INET6_ADDRSTRLEN];
   IPAddr ipaddr;
 
@@ -467,15 +461,10 @@ void upstream_connect_domain(uv_getaddrinfo_t* req, int status, struct addrinfo*
     int err;
     if ((err = upstream_connect(&sess->upstream_connect_req, &sess->upstream_tcp, 
             &ipaddr)) != 0) {
+      LOG_W("upstream_connect failed on [%s]:%d, err: %s",
+          ipstr, sess->socks5_ctx.dst_port, uv_strerror(err));
       continue;
     }
-
-    /*if ((err = uv_tcp_connect(&sess->upstream_connect_req, &sess->upstream_tcp, */
-            /*&ipaddr.addr, upstream_connect_cb)) != 0) {*/
-      /*LOG_W("uv_tcp_connect failed on [%s]:%d, err: %s", */
-          /*ipstr, sess->socks5_ctx.dst_port, uv_strerror(err));*/
-      /*continue;*/
-    /*}*/
 
     LOG_V("connected to [%s]:%d.", ipstr, sess->socks5_ctx.dst_port);
     uv_freeaddrinfo(res);
@@ -526,7 +515,14 @@ void upstream_connect_cb(uv_connect_t* req, int status) {
 }
 
 int upstream_connect(uv_connect_t* req, uv_tcp_t *handle, IPAddr *ipaddr) {
+  Session *sess = container_of(req, Session, upstream_connect_req);
+
   int err;
+  if ((err = uv_tcp_init(g_loop, &sess->upstream_tcp)) < 0) {
+    LOG_E("uv_tcp_init failed: %s", uv_strerror(err));
+    return err;
+  }
+
   if ((err = uv_tcp_connect(req, handle, &ipaddr->addr, upstream_connect_cb)) != 0) {
     LOG_W("uv_tcp_connect failed: %s", uv_strerror(err));
   }
