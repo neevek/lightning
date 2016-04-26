@@ -15,4 +15,7 @@ do { \
   } \
 } while (0)
 
+void log_ipv4_and_port(void *ipv4, int port, const char *msg);
+void log_ipv6_and_port(void *ipv6, int port, const char *msg);
+
 #endif /* end of include guard: UTIL_H_ */
