@@ -6,7 +6,7 @@
 #include "socks5.h"
 
 #define SERVER_HOST "127.0.0.1"
-#define SERVER_PORT 9002
+#define SERVER_PORT 8789
 #define SERVER_BACKLOG 256
 #define SESSION_DATA_BUFSIZ 2048
 
@@ -76,7 +76,7 @@ static void close_session(Session *sess);
 
 static int client_read_start(uv_stream_t *handle);
 static int client_write_start(uv_stream_t *handle, const uv_buf_t *buf);
-static int client_write_string(uv_stream_t *handle, const char *data);
+static int client_write_string(uv_stream_t *handle, const char *data, int len);
 static int client_write_error(uv_stream_t *handle, int uv_err);
 static void on_client_conn_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf);
 static void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf);
@@ -243,7 +243,7 @@ int client_read_start(uv_stream_t *handle) {
 int client_write_error(uv_stream_t *handle, int uv_err) {
   Session *sess = container_of(handle, Session, client_tcp);
 
-  char buf[] = { 5, 1, 0, 1, 0, 0, 0, 0, 0, 0, '\0' };
+  char buf[] = { 5, 1, 0, 1, 0, 0, 0, 0, 0, 0 };
   sess->state = END; // cause the session be closed in on_write_done_cb
 
   switch(uv_err) {
@@ -273,13 +273,13 @@ int client_write_error(uv_stream_t *handle, int uv_err) {
       break;
   }
 
-  return client_write_string(handle, buf);
+  return client_write_string(handle, buf, 10);
 }
 
-int client_write_string(uv_stream_t *handle, const char *data) {
+int client_write_string(uv_stream_t *handle, const char *data, int len) {
   uv_buf_t buf;
   buf.base = (char *)data;
-  buf.len = strlen(data);
+  buf.len = len;
   return client_write_start(handle, &buf);
 }
 
@@ -342,10 +342,10 @@ void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf
     if (sess->socks5_ctx.state == S5_PARSE_STATE_FINISH) {
       if ((sess->socks5_ctx.methods & S5_AUTH_NONE) != 0) { // we only support AUTH_NONE at the moment
         sess->state = REQ;
-        client_write_string(handle, "\5\0");
+        client_write_string(handle, "\5\0", 2);
       } else {
         sess->state = END;  // cause the session be closed in on_write_done_cb
-        client_write_string(handle, "\5\xff");
+        client_write_string(handle, "\5\xff", 2);
       }
 
       LOG_V("handshake passed");
