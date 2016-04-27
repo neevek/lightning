@@ -48,10 +48,12 @@ typedef enum {
 typedef struct {
   uv_tcp_t client_tcp;
   uv_write_t client_write_req;
+  uv_shutdown_t client_shutdown_req;
   char client_buf[SESSION_DATA_BUFSIZ];
 
   uv_tcp_t upstream_tcp;
   uv_write_t upstream_write_req;
+  uv_shutdown_t upstream_shutdown_req;
   uv_getaddrinfo_t upstream_addrinfo_req;
   uv_connect_t upstream_connect_req;
   char upstream_buf[SESSION_DATA_BUFSIZ]; 
@@ -73,7 +75,7 @@ static void on_connection_new(uv_stream_t *server, int status);
 
 static Session *create_session();
 static void close_session(Session *sess);
-static void client_handle_closed_cb(uv_handle_t *handle);
+static void client_handle_close_cb(uv_handle_t *handle);
 
 static int client_read_start(uv_stream_t *handle);
 static int client_write_start(uv_stream_t *handle, const uv_buf_t *buf);
@@ -82,6 +84,7 @@ static int client_write_error(uv_stream_t *handle, int err);
 static void on_client_conn_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf);
 static void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf);
 static void on_client_write_done(uv_write_t *req, int status);
+static void on_client_shutdown_cb(uv_shutdown_t *req, int status);
 
 static void upstream_connect_domain(uv_getaddrinfo_t* req, int status, struct addrinfo* res);
 static int upstream_connect(uv_connect_t* req, IPAddr *ipaddr);
@@ -93,6 +96,7 @@ static int upstream_write_start(uv_stream_t *handle, const uv_buf_t *buf);
 static void on_upstream_conn_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf);
 static void on_upstream_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf);
 static void on_upstream_write_done(uv_write_t *req, int status);
+static void on_upstream_shutdown_cb(uv_shutdown_t *req, int status);
 
 int main(int argc, const char *argv[]) {
   start_server(SERVER_HOST, SERVER_PORT, SERVER_BACKLOG);
@@ -201,21 +205,34 @@ Session *create_session() {
 
 void close_session(Session *sess) {
   uv_handle_t *handle = (uv_handle_t *)&sess->upstream_tcp;
+  uv_read_stop((uv_stream_t *)handle);
+  uv_shutdown(&sess->upstream_shutdown_req, (uv_stream_t *)handle, NULL);
   if (!uv_is_closing(handle) && uv_is_active(handle)) {
     uv_close(handle, NULL);
   }
 
   handle = (uv_handle_t *)&sess->client_tcp;
+  uv_read_stop((uv_stream_t *)handle);
+  uv_shutdown(&sess->client_shutdown_req, (uv_stream_t *)handle, NULL);
   if (!uv_is_closing(handle) && uv_is_active(handle)) {
-    uv_close(handle, client_handle_closed_cb);
+    uv_close(handle, client_handle_close_cb);
   } else {
+    // closing of upstream_tcp may still be pending, so this line may cause problem
     free(sess);
   }
 }
 
-void client_handle_closed_cb(uv_handle_t *handle) {
+void client_handle_close_cb(uv_handle_t *handle) {
   Session *sess = container_of(handle, Session, client_tcp);
   free(sess);
+}
+
+void on_client_shutdown_cb(uv_shutdown_t *req, int status) {
+
+}
+
+void on_upstream_shutdown_cb(uv_shutdown_t *req, int status) {
+
 }
 
 void on_connection_new(uv_stream_t *server, int status) {
@@ -223,6 +240,12 @@ void on_connection_new(uv_stream_t *server, int status) {
 
   int err;
   if ((err = uv_tcp_init(g_loop, &sess->client_tcp)) != 0) {
+    LOG_E("uv_tcp_init failed: %s", uv_strerror(err));
+    close_session(sess);
+    return;
+  }
+
+  if ((err = uv_tcp_init(g_loop, &sess->upstream_tcp)) != 0) {
     LOG_E("uv_tcp_init failed: %s", uv_strerror(err));
     close_session(sess);
     return;
@@ -304,6 +327,19 @@ int client_write_start(uv_stream_t *handle, const uv_buf_t *buf) {
   return err;
 }
 
+void on_client_write_done(uv_write_t *req, int status) {
+  Session *sess = container_of(req, Session, client_write_req);
+  if (status < 0 || sess->state == END) {
+    LOG_D("status=%d, now will close session", status);
+    close_session(sess);
+  } else {
+    client_read_start((uv_stream_t *)&sess->client_tcp);
+    if (sess->state == STREAMING) {
+      upstream_read_start((uv_stream_t *)&sess->upstream_tcp);
+    }
+  }
+}
+
 void on_client_conn_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
   Session *sess = container_of(handle, Session, client_tcp);
   buf->base = sess->client_buf;
@@ -316,7 +352,6 @@ void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf
 
   Session *sess = container_of(handle, Session, client_tcp);
   if (nread < 0) {
-    uv_read_stop((uv_stream_t *)&sess->upstream_tcp);
     LOG_I("client read done: %s", uv_strerror(nread));
     close_session(sess);
     return;
@@ -419,19 +454,6 @@ void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf
   }
 }
 
-void on_client_write_done(uv_write_t *req, int status) {
-  Session *sess = container_of(req, Session, client_write_req);
-  if (status < 0 || sess->state == END) {
-    LOG_D("status=%d, now will close session", status);
-    close_session(sess);
-  } else {
-    client_read_start((uv_stream_t *)&sess->client_tcp);
-    if (sess->state == STREAMING) {
-      upstream_read_start((uv_stream_t *)&sess->upstream_tcp);
-    }
-  }
-}
-
 int upstream_read_start(uv_stream_t *handle) {
   Session *sess = container_of(handle, Session, upstream_tcp);
   int err;
@@ -463,8 +485,6 @@ void on_upstream_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *b
 }
 
 int upstream_write_start(uv_stream_t *handle, const uv_buf_t *buf) {
-  uv_read_stop(handle);
-
   Session *sess = container_of(handle, Session, upstream_tcp);
   int err;
   if ((err = uv_write(&sess->upstream_write_req, (uv_stream_t *)handle, buf, 1, on_upstream_write_done)) != 0) {
@@ -480,7 +500,7 @@ void on_upstream_write_done(uv_write_t *req, int status) {
     LOG_V("upstream write failed: %s", uv_strerror(status));
     close_session(sess);
   } else {
-    upstream_read_start((uv_stream_t *)&sess->upstream_tcp);
+    client_read_start((uv_stream_t *)&sess->client_tcp);
   }
 }
 
@@ -584,13 +604,14 @@ void upstream_connect_log(Session *sess, int status) {
 int upstream_connect(uv_connect_t* req, IPAddr *ipaddr) {
   Session *sess = container_of(req, Session, upstream_connect_req);
 
-  int err;
-  if ((err = uv_tcp_init(g_loop, &sess->upstream_tcp)) < 0) {
-    LOG_E("uv_tcp_init failed: %s", uv_strerror(err));
-    client_write_error((uv_stream_t *)&sess->client_tcp, err); 
-    return err;
-  }
+  /*int err;*/
+  /*if ((err = uv_tcp_init(g_loop, &sess->upstream_tcp)) < 0) {*/
+    /*LOG_E("uv_tcp_init failed: %s", uv_strerror(err));*/
+    /*client_write_error((uv_stream_t *)&sess->client_tcp, err); */
+    /*return err;*/
+  /*}*/
 
+  int err;
   if ((err = uv_tcp_connect(req, &sess->upstream_tcp, &ipaddr->addr, upstream_connect_cb)) != 0) {
     LOG_W("uv_tcp_connect failed: %s", uv_strerror(err));
 
