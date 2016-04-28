@@ -218,7 +218,7 @@ void close_session(Session *sess) {
     uv_close(handle, client_handle_close_cb);
   } else {
     // closing of upstream_tcp may still be pending, so this line may cause problem
-    free(sess);
+    /*free(sess);*/
   }
 }
 
@@ -347,8 +347,16 @@ void on_client_conn_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
 }
 
 void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf) {
+  if (nread == 0) { // EAGAIN || EWOULDBLOCK
+    return;
+  }
+
   // stop reading before processing the data
   uv_read_stop(handle);
+
+  if (nread == UV_EOF) {
+    return;
+  }
 
   Session *sess = container_of(handle, Session, client_tcp);
   if (nread < 0) {
@@ -471,7 +479,15 @@ void on_upstream_conn_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
 }
 
 void on_upstream_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf) {
+  if (nread == 0) { // EAGAIN || EWOULDBLOCK
+    return;
+  }
+
   uv_read_stop(handle);
+
+  if (nread == UV_EOF) {
+    return;
+  }
 
   Session *sess = container_of(handle, Session, upstream_tcp);
   if (nread < 0 || sess->state == END) {
