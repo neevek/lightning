@@ -9,6 +9,7 @@
 #define SERVER_PORT 8789
 #define SERVER_BACKLOG 256
 #define SESSION_DATA_BUFSIZ 2048
+#define KEEPALIVE 60
 
 struct ServerContext;
 static struct ServerContext *g_server_ctx;
@@ -39,10 +40,10 @@ typedef struct ServerContext {
 } ServerContext;
 
 typedef enum {
-  HANDSHAKE,
-  REQ,
-  STREAMING,
-  END
+  S5_METHOD_IDENTIFICATION,
+  S5_REQUEST,
+  S5_STREAMING,
+  S5_STREAMING_END,
 } SessionState;
 
 typedef struct {
@@ -57,6 +58,8 @@ typedef struct {
   uv_getaddrinfo_t upstream_addrinfo_req;
   uv_connect_t upstream_connect_req;
   char upstream_buf[SESSION_DATA_BUFSIZ]; 
+
+  uv_timer_t timer_release_req;
 
   SessionState state;
   Socks5Ctx socks5_ctx;
@@ -76,6 +79,8 @@ static void on_connection_new(uv_stream_t *server, int status);
 static Session *create_session();
 static void close_session(Session *sess);
 static void client_handle_close_cb(uv_handle_t *handle);
+static void schedule_release_timer(Session *sess);
+static void release_timer_cb(uv_timer_t *req);
 
 static int client_read_start(uv_stream_t *handle);
 static int client_write_start(uv_stream_t *handle, const uv_buf_t *buf);
@@ -84,7 +89,6 @@ static int client_write_error(uv_stream_t *handle, int err);
 static void on_client_conn_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf);
 static void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf);
 static void on_client_write_done(uv_write_t *req, int status);
-static void on_client_shutdown_cb(uv_shutdown_t *req, int status);
 
 static void upstream_connect_domain(uv_getaddrinfo_t* req, int status, struct addrinfo* res);
 static int upstream_connect(uv_connect_t* req, IPAddr *ipaddr);
@@ -96,7 +100,6 @@ static int upstream_write_start(uv_stream_t *handle, const uv_buf_t *buf);
 static void on_upstream_conn_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf);
 static void on_upstream_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf);
 static void on_upstream_write_done(uv_write_t *req, int status);
-static void on_upstream_shutdown_cb(uv_shutdown_t *req, int status);
 
 int main(int argc, const char *argv[]) {
   start_server(SERVER_HOST, SERVER_PORT, SERVER_BACKLOG);
@@ -199,43 +202,44 @@ void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res)
 
 Session *create_session() {
   Session *sess = lmalloc(sizeof(Session));
-  sess->state = HANDSHAKE;
+  sess->state = S5_METHOD_IDENTIFICATION;
   return sess;
 }
 
 void close_session(Session *sess) {
+  LOG_D("now will close session");
   uv_handle_t *handle = (uv_handle_t *)&sess->upstream_tcp;
   uv_read_stop((uv_stream_t *)handle);
-  uv_shutdown(&sess->upstream_shutdown_req, (uv_stream_t *)handle, NULL);
-  if (!uv_is_closing(handle) && uv_is_active(handle)) {
+  if (!uv_is_closing(handle)) {
     uv_close(handle, NULL);
   }
 
   handle = (uv_handle_t *)&sess->client_tcp;
   uv_read_stop((uv_stream_t *)handle);
-  uv_shutdown(&sess->client_shutdown_req, (uv_stream_t *)handle, NULL);
-  if (!uv_is_closing(handle) && uv_is_active(handle)) {
+  if (!uv_is_closing(handle)) {
     uv_close(handle, client_handle_close_cb);
   } else {
-    // closing of upstream_tcp may still be pending, so this line may cause problem
-    /*free(sess);*/
+    schedule_release_timer(sess);
   }
 }
 
 void client_handle_close_cb(uv_handle_t *handle) {
   Session *sess = container_of(handle, Session, client_tcp);
+  schedule_release_timer(sess);
+}
+
+void schedule_release_timer(Session *sess) {
+  uv_timer_init(g_loop, &sess->timer_release_req);
+  uv_timer_start(&sess->timer_release_req, release_timer_cb, 0, 0);
+}
+
+void release_timer_cb(uv_timer_t *req) {
+  Session *sess = container_of(req, Session, timer_release_req);
   free(sess);
 }
 
-void on_client_shutdown_cb(uv_shutdown_t *req, int status) {
-
-}
-
-void on_upstream_shutdown_cb(uv_shutdown_t *req, int status) {
-
-}
-
 void on_connection_new(uv_stream_t *server, int status) {
+  LOG_D(">>>> accepted new connection");
   Session *sess = create_session();
 
   int err;
@@ -244,12 +248,14 @@ void on_connection_new(uv_stream_t *server, int status) {
     close_session(sess);
     return;
   }
+  uv_tcp_keepalive(&sess->client_tcp, 1, KEEPALIVE);
 
   if ((err = uv_tcp_init(g_loop, &sess->upstream_tcp)) != 0) {
     LOG_E("uv_tcp_init failed: %s", uv_strerror(err));
     close_session(sess);
     return;
   }
+  uv_tcp_keepalive(&sess->upstream_tcp, 1, KEEPALIVE);
 
   if ((err = uv_accept(server, (uv_stream_t *)&sess->client_tcp)) != 0) {
     LOG_E("uv_accept failed: %s", uv_strerror(err));
@@ -275,33 +281,15 @@ int client_write_error(uv_stream_t *handle, int err) {
   Session *sess = container_of(handle, Session, client_tcp);
 
   char buf[] = { 5, 1, 0, 1, 0, 0, 0, 0, 0, 0 };
-  sess->state = END; // cause the session be closed in on_write_done_cb
+  sess->state = S5_STREAMING_END; // cause the session be closed in on_write_done_cb
 
   switch(err) {
-    case UV_ENETUNREACH:
-      buf[1] = 3; // from the RFC: 3 = Network unreachable
-      break;
-    case UV_EHOSTUNREACH:
-      buf[1] = 4; // from the RFC: 4 = Host unreachable
-      sess->state = END;
-      break;
-    case UV_ECONNREFUSED:
-      buf[1] = 5;
-      sess->state = END;
-      break;
-
-    case S5_UNSUPPORTED_CMD:
-      buf[1] = 7;
-      sess->state = END;
-      break;
-    case S5_BAD_ATYP:
-      buf[1] = 8;
-      sess->state = END;
-      break;
-    default:
-      buf[1] = 1; // general SOCKS server failure
-      sess->state = END;
-      break;
+    case UV_ENETUNREACH: buf[1] = 3; break; // from the RFC: 3 = Network unreachable
+    case UV_EHOSTUNREACH: buf[1] = 4; break; // from the RFC: 4 = Host unreachable
+    case UV_ECONNREFUSED: buf[1] = 5; break;
+    case S5_UNSUPPORTED_CMD: buf[1] = 7; break;
+    case S5_BAD_ATYP: buf[1] = 8; break;
+    default: buf[1] = 1; break; // general SOCKS server failure
   }
 
   uv_read_stop(handle);
@@ -329,12 +317,12 @@ int client_write_start(uv_stream_t *handle, const uv_buf_t *buf) {
 
 void on_client_write_done(uv_write_t *req, int status) {
   Session *sess = container_of(req, Session, client_write_req);
-  if (status < 0 || sess->state == END) {
+  if (status < 0 || sess->state == S5_STREAMING_END) {
     LOG_D("status=%d, now will close session", status);
     close_session(sess);
   } else {
     client_read_start((uv_stream_t *)&sess->client_tcp);
-    if (sess->state == STREAMING) {
+    if (sess->state == S5_STREAMING) {
       upstream_read_start((uv_stream_t *)&sess->upstream_tcp);
     }
   }
@@ -348,15 +336,12 @@ void on_client_conn_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
 
 void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf) {
   if (nread == 0) { // EAGAIN || EWOULDBLOCK
+    LOG_I("nread is 0, may reuse the connection");
     return;
   }
 
   // stop reading before processing the data
   uv_read_stop(handle);
-
-  if (nread == UV_EOF) {
-    return;
-  }
 
   Session *sess = container_of(handle, Session, client_tcp);
   if (nread < 0) {
@@ -365,7 +350,7 @@ void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf
     return;
   }
 
-  if (sess->state == HANDSHAKE) {
+  if (sess->state == S5_METHOD_IDENTIFICATION) {
     S5Err s5_err = socks5_parse_handshake(&sess->socks5_ctx, buf->base, nread);
     if (s5_err != S5_OK) {
       LOG_E("parse handshake failed");
@@ -377,10 +362,10 @@ void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf
     if (sess->socks5_ctx.state == S5_PARSE_STATE_FINISH) {
       // we only support AUTH_NONE at the moment
       if (sess->socks5_ctx.methods & S5_AUTH_NONE) { 
-        sess->state = REQ;
+        sess->state = S5_REQUEST;
         client_write_string(handle, "\5\0", 2);
       } else {
-        sess->state = END;  // cause the session be closed in on_write_done_cb
+        sess->state = S5_STREAMING_END;  // cause the session be closed in on_write_done_cb
         client_write_string(handle, "\5\xff", 2);
       }
 
@@ -390,7 +375,7 @@ void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf
       client_read_start((uv_stream_t *)handle);
     }
 
-  } else if (sess->state == REQ) {
+  } else if (sess->state == S5_REQUEST) {
     S5Err s5_err = socks5_parse_req(&sess->socks5_ctx, buf->base, nread); 
     if (s5_err != S5_OK) {
       LOG_E("parsed req failed");
@@ -452,7 +437,7 @@ void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf
       client_write_error(handle, 20000);  // the error code is chosen at random
     }
 
-  } else if (sess->state == STREAMING) { 
+  } else if (sess->state == S5_STREAMING) { 
     ((uv_buf_t *)buf)->len = nread;
     upstream_write_start((uv_stream_t *)&sess->upstream_tcp, buf);
 
@@ -480,17 +465,14 @@ void on_upstream_conn_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
 
 void on_upstream_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf) {
   if (nread == 0) { // EAGAIN || EWOULDBLOCK
+    LOG_I("nread is 0, may reuse the connection");
     return;
   }
 
   uv_read_stop(handle);
 
-  if (nread == UV_EOF) {
-    return;
-  }
-
   Session *sess = container_of(handle, Session, upstream_tcp);
-  if (nread < 0 || sess->state == END) {
+  if (nread < 0 || sess->state == S5_STREAMING_END) {
     LOG_V("upstream read failed: %s", uv_strerror(nread));
     close_session(sess);
     return;
@@ -512,7 +494,7 @@ int upstream_write_start(uv_stream_t *handle, const uv_buf_t *buf) {
 
 void on_upstream_write_done(uv_write_t *req, int status) {
   Session *sess = container_of(req, Session, upstream_write_req);
-  if (status < 0 || sess->state == END) {
+  if (status < 0 || sess->state == S5_STREAMING_END) {
     LOG_V("upstream write failed: %s", uv_strerror(status));
     close_session(sess);
   } else {
@@ -575,7 +557,7 @@ void upstream_connect_cb(uv_connect_t* req, int status) {
     client_write_error((uv_stream_t *)&sess->client_tcp, status); 
 
   } else {
-    sess->state = STREAMING;
+    sess->state = S5_STREAMING;
 
     uv_buf_t buf = {
       .base = sess->client_buf
