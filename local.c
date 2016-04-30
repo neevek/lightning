@@ -265,18 +265,22 @@ void on_connection_new(uv_stream_t *server, int status) {
     return;
   }
 
-  // though we do not need the upstream_tcp at this point, it is
-  // appropriate to init it here to avoid unnessary bugs
-  if ((err = uv_tcp_init(g_loop, &sess->upstream_tcp)) != 0) {
-    LOG_E("uv_tcp_init failed: %s", uv_strerror(err));
-    close_session(sess);
-    return;
-  }
+  // the session object may be reused, and connection to upstream
+  // may still be useable, so should not be re-initialized
+  if (!uv_has_ref((uv_handle_t *)&sess->upstream_tcp)) {
+    // though we do not need the upstream_tcp at this point, it is
+    // appropriate to init it here to avoid unnessary bugs
+    if ((err = uv_tcp_init(g_loop, &sess->upstream_tcp)) != 0) {
+      LOG_E("uv_tcp_init failed: %s", uv_strerror(err));
+      close_session(sess);
+      return;
+    }
 
-  if ((err = uv_tcp_keepalive(&sess->upstream_tcp, 1, KEEPALIVE)) != 0) {
-    LOG_E("uv_tcp_init failed: %s", uv_strerror(err));
-    close_session(sess);
-    return;
+    if ((err = uv_tcp_keepalive(&sess->upstream_tcp, 1, KEEPALIVE)) != 0) {
+      LOG_E("uv_tcp_init failed: %s", uv_strerror(err));
+      close_session(sess);
+      return;
+    }
   }
 
   if ((err = uv_accept(server, (uv_stream_t *)&sess->client_tcp)) != 0) {
