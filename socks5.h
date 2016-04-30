@@ -50,7 +50,7 @@ typedef struct {
   uint16_t dst_port;
 } Socks5Ctx;
 
-S5Err socks5_parse_handshake(Socks5Ctx *socks5_ctx, const char *data, int size);
-S5Err socks5_parse_req(Socks5Ctx *socks5_ctx, const char *data, int size);
+S5Err socks5_parse_method_identification(Socks5Ctx *socks5_ctx, const char *data, int size);
+S5Err socks5_parse_request(Socks5Ctx *socks5_ctx, const char *data, int size);
 
 #endif /* end of include guard: SOCKS5_H_ */

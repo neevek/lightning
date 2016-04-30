@@ -1,7 +1,7 @@
 #include "socks5.h"
 #include "log/log.h"
 
-S5Err socks5_parse_handshake(Socks5Ctx *socks5_ctx, const char *data, int size) {
+S5Err socks5_parse_method_identification(Socks5Ctx *socks5_ctx, const char *data, int size) {
   socks5_ctx->state = S5_PARSE_STATE_VERSION;
 
   int i = 0;
@@ -56,7 +56,7 @@ S5Err socks5_parse_handshake(Socks5Ctx *socks5_ctx, const char *data, int size) 
   return S5_OK;
 }
 
-S5Err socks5_parse_req(Socks5Ctx *socks5_ctx, const char *data, int size) {
+S5Err socks5_parse_request(Socks5Ctx *socks5_ctx, const char *data, int size) {
   socks5_ctx->state = S5_PARSE_STATE_REQ_VERSION;
 
   int i = 0;
