@@ -4,20 +4,20 @@
 #include <stdlib.h>
 #include <assert.h>
 
-void list_init(List *list) {
+void list_init(List *list, void(*destroy_cb)(void *data)) {
   assert(list);
-  list->size_ = 0;
   memset(list, 0, sizeof(List));
+  list->destroy_cb_ = destroy_cb;
 }
 
-void list_destroy(List *list, void(*cb)(void *data)) {
+void list_destroy(List *list) {
   assert(list);
   Node *node = list->head_;
   while (node) {
     Node *cur_node = node;
 
-    if (cb) {
-      cb(node->data_);
+    if (list->destroy_cb_) {
+      list->destroy_cb_(node->data_);
     }
     node = node->next_;
 
@@ -100,12 +100,12 @@ int list_size(List *list) {
   return list->size_;
 }
 
-Iterator list_iterator(List *list) {
+ListIterator list_iterator(List *list) {
   assert(list);
-  return (Iterator){ list->head_ };
+  return (ListIterator){ list->head_ };
 }
 
-void *list_next(Iterator *it) {
+void *list_next(ListIterator *it) {
   assert(it);
   Node *node = it->node_;
   if (node) {

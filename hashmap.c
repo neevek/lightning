@@ -74,6 +74,7 @@ void hashmap_remove(HashMap *hashmap, const char *key) {
       }
       free((char *)entry->key_);
       free(entry);
+      --hashmap->size_;
     }
 
     prev = entry;
@@ -148,9 +149,6 @@ void add_entry(HashMap *hashmap, int hash, const char *key,
   entry->next_ = hashmap->entries_[index];
   hashmap->entries_[index] = entry;
 
-  if (entry->next_)
-  printf("key: %s, has collision\n", key);
-
   ++hashmap->size_;
   if (hashmap->size_ >= hashmap->threashold_) {
     resize(hashmap, hashmap->capacity_ * 2);
@@ -204,6 +202,29 @@ void resize(HashMap *hashmap, int new_capacity) {
   }
 
   hashmap->threashold_ = new_capacity * hashmap->load_factor_;
-  printf("new capacity: %d\n", new_capacity);
+}
+
+KeyIterator hashmap_key_iterator(HashMap *hashmap) {
+  assert(hashmap != NULL);
+  return (KeyIterator){ .entry_ = NULL, .current_index_ = 0 };
+}
+
+const char *hashmap_next_key(HashMap *hashmap, KeyIterator *it) {
+  assert(hashmap != NULL);
+
+  while (it->current_index_ < hashmap->capacity_) {
+    if (it->entry_ == NULL) {
+      it->entry_ = hashmap->entries_[it->current_index_];
+      ++it->current_index_;
+    }
+
+    if (it->entry_) {
+      Entry *entry = it->entry_;
+      it->entry_ = entry->next_;
+      return entry->key_;
+    }
+  }
+
+  return NULL;
 }
 
