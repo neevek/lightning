@@ -23,7 +23,6 @@ typedef struct {
   uv_getaddrinfo_t upstream_addrinfo_req;
   uv_connect_t upstream_connect_req;
   char upstream_buf[SESSION_DATA_BUFSIZ]; 
-  int upstream_tcp_valid;
 
   SessionState state;
   Socks5Ctx s5_ctx;
