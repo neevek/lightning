@@ -18,7 +18,7 @@ static uv_loop_t *g_loop;
 
 typedef struct {
   const char *host;
-  int port;
+  int local_port;
   int backlog;
 } ServerCfg;
 
@@ -30,14 +30,7 @@ typedef enum {
 typedef struct ServerContext {
   uv_getaddrinfo_t addrinfo_req;
   uv_tcp_t server_tcp;
-
   ServerCfg server_cfg;
-  IPVersion bound_ip_ver;
-  union {
-    unsigned char ipv6[16];
-    unsigned char ipv4[4];
-  } bound_ip; 
-
 } ServerContext;
 
 typedef union {
@@ -46,7 +39,7 @@ typedef union {
   struct sockaddr_in6 addr6;
 } IPAddr;
 
-static void start_server(const char *host, int port, int backlog);
+static void start_server(const char *host, int local_port, int backlog);
 static void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res);
 static void on_connection_new(uv_stream_t *server, int status);
 static void destroy_tcp_handle_cb(uv_tcp_t *tcp_handle);
@@ -81,7 +74,7 @@ int main(int argc, const char *argv[]) {
   return 0;
 }
 
-void start_server(const char *host, int port, int backlog) {
+void start_server(const char *host, int local_port, int backlog) {
   g_loop = uv_default_loop();
 
   ServerContext server_ctx;
@@ -89,7 +82,7 @@ void start_server(const char *host, int port, int backlog) {
   g_server_ctx = &server_ctx;
 
   server_ctx.server_cfg.host = host;
-  server_ctx.server_cfg.port = port;
+  server_ctx.server_cfg.local_port = local_port;
   server_ctx.server_cfg.backlog = backlog;
 
   struct addrinfo hint;
@@ -126,21 +119,13 @@ void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res)
   for (struct addrinfo *ai = res; ai != NULL; ai = ai->ai_next) {
     if (ai->ai_family == AF_INET) {
       ipaddr.addr4 = *(struct sockaddr_in *)ai->ai_addr;
-      ipaddr.addr4.sin_port = htons(g_server_ctx->server_cfg.port);
+      ipaddr.addr4.sin_port = htons(g_server_ctx->server_cfg.local_port);
       uv_inet_ntop(ipaddr.addr.sa_family, &ipaddr.addr4.sin_addr, ipstr, sizeof(ipstr));
-      
-      g_server_ctx->bound_ip_ver = IPV4;
-      memcpy(&g_server_ctx->bound_ip, &ipaddr.addr4.sin_addr.s_addr, 
-          sizeof(g_server_ctx->bound_ip.ipv4));
 
     } else if (ai->ai_family == AF_INET6) {
       ipaddr.addr6 = *(struct sockaddr_in6 *)ai->ai_addr;
-      ipaddr.addr6.sin6_port = htons(g_server_ctx->server_cfg.port);
+      ipaddr.addr6.sin6_port = htons(g_server_ctx->server_cfg.local_port);
       uv_inet_ntop(ipaddr.addr.sa_family, &ipaddr.addr6.sin6_addr, ipstr, sizeof(ipstr));
-
-      g_server_ctx->bound_ip_ver = IPV6;
-      memcpy(&g_server_ctx->bound_ip, ipaddr.addr6.sin6_addr.s6_addr, 
-          sizeof(g_server_ctx->bound_ip.ipv6));
 
     } else {
       LOG_W("unexpected ai_family: %d", ai->ai_family);
@@ -150,7 +135,7 @@ void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res)
     int err;
     if ((err = uv_tcp_bind(&g_server_ctx->server_tcp, &ipaddr.addr, 0)) != 0) {
       LOG_W("uv_tcp_bind on %s:%d failed: %s", 
-          ipstr, g_server_ctx->server_cfg.port, uv_strerror(err));
+          ipstr, g_server_ctx->server_cfg.local_port, uv_strerror(err));
       continue;
     }
 
@@ -158,16 +143,16 @@ void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res)
           g_server_ctx->server_cfg.backlog, 
           on_connection_new)) != 0) {
       LOG_W("uv_tcp_listen on %s:%d failed: %s", 
-          ipstr, g_server_ctx->server_cfg.port, uv_strerror(err));
+          ipstr, g_server_ctx->server_cfg.local_port, uv_strerror(err));
       continue;
     }
     
-    LOG_I("server listening on %s:%d", ipstr, g_server_ctx->server_cfg.port);
+    LOG_I("server listening on %s:%d", ipstr, g_server_ctx->server_cfg.local_port);
     uv_freeaddrinfo(res);
     return;
   }
 
-  LOG_E("failed to bind on port: %d", g_server_ctx->server_cfg.port);
+  LOG_E("failed to bind on local_port: %d", g_server_ctx->server_cfg.local_port);
   exit(1);
 } 
 
@@ -558,22 +543,38 @@ void upstream_connect_cb(uv_connect_t* req, int status) {
 }
 
 void finish_socks5_handshake(Session *sess) {
+  IPAddr ipaddr;
+  int err;
+  if ((err = uv_tcp_getsockname(sess->upstream_tcp, &ipaddr.addr, 
+          (int []){ sizeof(ipaddr) })) < 0) {
+    LOG_W("uv_tcp_getsockname failed: %s", uv_strerror(err));
+    client_write_error((uv_stream_t *)sess->client_tcp, err);
+    return;
+  }
+
   sess->state = S5_STREAMING;
 
   uv_buf_t buf = {
     .base = sess->client_buf
   };
   memcpy(buf.base, "\5\0\0\1", 4);
-  if (g_server_ctx->bound_ip_ver == IPV4) {
+  uint16_t local_port = 0;
+  if (ipaddr.addr.sa_family == AF_INET) {
+    local_port = ntohs(ipaddr.addr4.sin_port);
+
     buf.len = 10;
-    memcpy(buf.base+4, &g_server_ctx->bound_ip, 4);
-    memcpy(buf.base+8, &g_server_ctx->server_cfg.port, 2);
+    memcpy(buf.base+4, &ipaddr.addr4.sin_addr.s_addr, 4);
+    memcpy(buf.base+8, &local_port, 2);
+
   } else {  // IPV6
+    local_port = ntohs(ipaddr.addr6.sin6_port);
+
     buf.len = 22;
-    memcpy(buf.base+4, &g_server_ctx->bound_ip, 16);
-    memcpy(buf.base+20, &g_server_ctx->server_cfg.port, 2);
+    memcpy(buf.base+4, &ipaddr.addr6.sin6_addr.s6_addr, 16);
+    memcpy(buf.base+20, &local_port, 2);
   }
 
+  LOG_I("new connection bound to local local_port: %d", local_port);
   client_write_start((uv_stream_t *)sess->client_tcp, &buf);
 }
 
