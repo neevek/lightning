@@ -42,7 +42,6 @@ typedef union {
 static void start_server(const char *host, int local_port, int backlog);
 static void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res);
 static void on_connection_new(uv_stream_t *server, int status);
-static void destroy_tcp_handle_cb(uv_tcp_t *tcp_handle);
 
 static Session *create_session();
 static int init_tcp_handle(Session *sess, uv_tcp_t **tcp_handle);
@@ -155,10 +154,6 @@ void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res)
   LOG_E("failed to bind on local_port: %d", g_server_ctx->server_cfg.local_port);
   exit(1);
 } 
-
-void destroy_tcp_handle_cb(uv_tcp_t *tcp_handle) {
-  /*free(tcp_handle);*/
-}
 
 Session *create_session() {
   Session *sess = lmalloc(sizeof(Session));
