@@ -555,21 +555,21 @@ void finish_socks5_handshake(Session *sess) {
   memcpy(buf.base, "\5\0\0\1", 4);
   uint16_t local_port = 0;
   if (ipaddr.addr.sa_family == AF_INET) {
-    local_port = ntohs(ipaddr.addr4.sin_port);
+    local_port = ipaddr.addr4.sin_port;
 
     buf.len = 10;
     memcpy(buf.base+4, &ipaddr.addr4.sin_addr.s_addr, 4);
     memcpy(buf.base+8, &local_port, 2);
 
   } else {  // IPV6
-    local_port = ntohs(ipaddr.addr6.sin6_port);
+    local_port = ipaddr.addr6.sin6_port;
 
     buf.len = 22;
     memcpy(buf.base+4, &ipaddr.addr6.sin6_addr.s6_addr, 16);
     memcpy(buf.base+20, &local_port, 2);
   }
 
-  LOG_I("new connection bound to local local_port: %d", local_port);
+  LOG_I("new connection bound to local local_port: %d", ntohs(local_port));
   client_write_start((uv_stream_t *)sess->client_tcp, &buf);
 }
 
