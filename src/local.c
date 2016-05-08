@@ -46,7 +46,7 @@ static int init_udp_handle(Session *sess, uv_udp_t **udp_handle);
 static Session *create_session();
 static int init_tcp_handle(Session *sess, uv_tcp_t **tcp_handle);
 static void close_session(Session *sess);
-static void tcp_handle_close_cb(uv_handle_t *handle);
+static void handle_close_cb(uv_handle_t *handle);
 static void finish_socks5_tcp_handshake(Session *sess);
 static void finish_socks5_udp_handshake(Session *sess);
 static void finish_socks5_handshake(Session *sess, IPAddr *ipaddr);
@@ -74,6 +74,10 @@ static void on_upstream_tcp_write_done(uv_write_t *req, int status);
 static void on_client_udp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf);
 static void on_client_udp_recv_done(uv_udp_t* handle, ssize_t nread, 
     const uv_buf_t* buf, const struct sockaddr* addr, unsigned flags);
+static void on_upstream_udp_send_done(uv_udp_send_t* req, int status);
+static int client_udp_recv_start(uv_stream_t *handle);
+static void upstream_udp_send(uv_getaddrinfo_t* req, int status, 
+    struct addrinfo* res);
 
 int main(int argc, const char *argv[]) {
   start_server(SERVER_HOST, SERVER_PORT, SERVER_BACKLOG);
@@ -211,7 +215,35 @@ void close_session(Session *sess) {
       uv_read_stop((uv_stream_t *)handle);
 
       if (!uv_is_closing(handle)) {
-        uv_close(handle, tcp_handle_close_cb);
+        uv_close(handle, handle_close_cb);
+      }
+    }
+  } else if (sess->type == SESSION_TYPE_UDP) {
+    UDPSession *udp_sess = (UDPSession *)sess;
+    if (udp_sess->client_udp) {
+      uv_handle_t *handle = (uv_handle_t *)udp_sess->client_udp;
+      uv_udp_recv_stop(udp_sess->client_udp);
+
+      if (!uv_is_closing(handle)) {
+        uv_close(handle, handle_close_cb);
+      }
+    }
+
+    if (udp_sess->upstream_udp_send) {
+      uv_handle_t *handle = (uv_handle_t *)udp_sess->upstream_udp_send;
+      uv_udp_recv_stop(udp_sess->upstream_udp_send);
+
+      if (!uv_is_closing(handle)) {
+        uv_close(handle, handle_close_cb);
+      }
+    }
+
+    if (udp_sess->client_udp_send) {
+      uv_handle_t *handle = (uv_handle_t *)udp_sess->client_udp_send;
+      uv_udp_recv_stop(udp_sess->client_udp_send);
+
+      if (!uv_is_closing(handle)) {
+        uv_close(handle, handle_close_cb);
       }
     }
   }
@@ -220,14 +252,14 @@ void close_session(Session *sess) {
     uv_handle_t *handle = (uv_handle_t *)sess->client_tcp;
     uv_read_stop((uv_stream_t *)handle);
     if (!uv_is_closing(handle)) {
-      uv_close(handle, tcp_handle_close_cb);
+      uv_close(handle, handle_close_cb);
     }
   }
 
   free(sess);
 }
 
-void tcp_handle_close_cb(uv_handle_t *handle) {
+void handle_close_cb(uv_handle_t *handle) {
   free(handle);
 }
 
@@ -384,6 +416,7 @@ void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t 
       LOG_V("received a UDP request");
 
       sess = lrealloc(sess, sizeof(UDPSession));
+      memset(((char *)sess)+sizeof(Session), 0, sizeof(UDPSession)-sizeof(Session));
       // reset the session object for client_tcp, because the memory address
       // may be changed after realloc
       handle->data = sess;  
@@ -394,6 +427,7 @@ void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t 
 
     // alright, it is a CONNECT request
     sess = lrealloc(sess, sizeof(TCPSession));
+    memset(((char *)sess)+sizeof(Session), 0, sizeof(TCPSession)-sizeof(Session));
     // reset the session object for client_tcp, because the memory address
     // may be changed after realloc
     handle->data = sess;
@@ -433,7 +467,7 @@ void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t 
             NULL, 
             &hint)) != 0) {
 
-        LOG_E("upstream connect failed: %s, err: %s", 
+        LOG_E("uv_getaddrinfo failed: %s, err: %s", 
             s5_ctx->dst_addr, uv_strerror(err));
         client_tcp_write_error(handle, err);
         return;
@@ -603,8 +637,15 @@ void finish_socks5_udp_handshake(Session *sess) {
   }
 
   UDPSession *udp_sess = (UDPSession *)sess;
+  init_udp_handle(sess, &udp_sess->upstream_udp_send);
+  init_udp_handle(sess, &udp_sess->client_udp_send);
   init_udp_handle(sess, &udp_sess->client_udp);
   uv_udp_bind(udp_sess->client_udp, &ipaddr.addr, UV_UDP_REUSEADDR);
+
+  /*// bind  */
+  /*if (sess->s5_ctx.dst_port != 0) {*/
+    /*uv_udp_bind(udp_sess->client_udp, &ipaddr.addr, UV_UDP_REUSEADDR);*/
+  /*}*/
 
   if ((err = uv_udp_getsockname(udp_sess->client_udp, &ipaddr.addr, 
           (int []){ sizeof(ipaddr) })) < 0) {
@@ -639,30 +680,22 @@ void finish_socks5_handshake(Session *sess, IPAddr *ipaddr) {
     memcpy(buf.base+20, &local_port, 2);
   }
 
-  LOG_I("new connection bound to local local_port: %d", ntohs(local_port));
+  LOG_I("new connection bound to local port: %d", ntohs(local_port));
   client_tcp_write_start((uv_stream_t *)sess->client_tcp, &buf);
 }
 
 void upstream_tcp_connect_log(Session *sess, int status) {
+    char ipstr[INET6_ADDRSTRLEN];
   if (sess->s5_ctx.atyp == S5_ATYP_IPV4) {
-    char ipstr[INET_ADDRSTRLEN];
     uv_inet_ntop(AF_INET, sess->s5_ctx.dst_addr, ipstr, INET_ADDRSTRLEN);
-    LOG_I("uv_tcp_connect: %s:%d, status: %s", 
-        ipstr, sess->s5_ctx.dst_port, 
-        status ? uv_strerror(status) : "CONNECTED");
 
   } else if (sess->s5_ctx.atyp == S5_ATYP_IPV6) {
-    char ipstr[INET6_ADDRSTRLEN];
     uv_inet_ntop(AF_INET6, sess->s5_ctx.dst_addr, ipstr, INET6_ADDRSTRLEN);
-    LOG_I("uv_tcp_connect: [%s]:%d, status: %s", 
-        ipstr, sess->s5_ctx.dst_port, 
-        status ? uv_strerror(status) : "CONNECTED");
-
-  } else {
-    LOG_I("uv_tcp_connect: %s:%d, status: %s", 
-        sess->s5_ctx.dst_addr, sess->s5_ctx.dst_port, 
-        status ? uv_strerror(status) : "CONNECTED");
   }
+
+  LOG_I("uv_tcp_connect: [%s]:%d, status: %s", 
+      ipstr, sess->s5_ctx.dst_port, 
+      status ? uv_strerror(status) : "CONNECTED");
 }
 
 int upstream_tcp_connect(uv_connect_t* req, IPAddr *ipaddr) {
@@ -684,4 +717,130 @@ void on_client_udp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
 
 void on_client_udp_recv_done(uv_udp_t* handle, ssize_t nread, 
     const uv_buf_t* buf, const struct sockaddr* addr, unsigned flags) {
+  LOG_V("received udp packet: %lu", nread);
+  if (nread < 0) {
+    // TODO end the association
+    return;
+  }
+
+  if (nread == 0 && addr == NULL) {
+    return;
+  }
+
+  UDPSession *sess = (UDPSession *)handle->data;
+  int err;
+  if ((err = socks5_parse_udp_request(&sess->s5_ctx, buf->base, buf->len)) != S5_OK) {
+      LOG_E("socks5_parse_udp_request failed, ignored the dgram, err: %d", err);
+      return;
+  }
+
+  uv_udp_recv_stop(handle);
+
+  ((uv_buf_t *)buf)->len = nread;
+
+  Socks5Ctx *s5_ctx = &sess->s5_ctx;
+  if (s5_ctx->atyp == S5_ATYP_IPV4) {
+    struct sockaddr_in addr4;
+    addr4.sin_family = AF_INET;
+    addr4.sin_port = htons(s5_ctx->dst_port);
+    memcpy(&addr4.sin_addr.s_addr, s5_ctx->dst_addr, 4);
+
+    err = uv_udp_send(&sess->upstream_udp_send_req, sess->upstream_udp_send, 
+        buf, 1, (struct sockaddr *)&addr4, on_upstream_udp_send_done);
+    if (err < 0) {
+      LOG_E("uv_udp_send failed: %s", uv_strerror(err));
+      log_ipv6_and_port(s5_ctx->dst_addr, s5_ctx->dst_port, 
+          "uv_udp_send failed");
+      client_udp_recv_start((uv_stream_t *)sess->client_udp);
+    }
+
+  } else if (s5_ctx->atyp == S5_ATYP_DOMAIN) {
+    struct addrinfo hint;
+    memset(&hint, 0, sizeof(hint));
+    hint.ai_family = AF_UNSPEC;
+    hint.ai_socktype = SOCK_DGRAM;
+    hint.ai_protocol = IPPROTO_UDP;
+
+    ((UDPSession *)sess)->upstream_udp_addrinfo_req.data = (void *)buf;
+
+    LOG_V("now will send udp packet to: %s", (const char *)s5_ctx->dst_addr);
+    int err;
+    if ((err = uv_getaddrinfo(g_loop, 
+            &((UDPSession *)sess)->upstream_udp_addrinfo_req, 
+            upstream_udp_send, 
+            (const char *)s5_ctx->dst_addr, 
+            NULL, 
+            &hint)) != 0) {
+
+      LOG_E("uv_getaddrinfo failed: %s, err: %s", 
+          s5_ctx->dst_addr, uv_strerror(err));
+      client_udp_recv_start((uv_stream_t *)sess->client_udp);
+    }
+
+  } else if (s5_ctx->atyp == S5_ATYP_IPV6) {
+    struct sockaddr_in6 addr6;
+    addr6.sin6_family = AF_INET6;
+    addr6.sin6_port = htons(s5_ctx->dst_port);
+    memcpy(&addr6.sin6_addr.s6_addr, s5_ctx->dst_addr, 16);
+
+    err = uv_udp_send(&sess->upstream_udp_send_req, sess->upstream_udp_send, 
+        buf, 1, (struct sockaddr *)&addr6, on_upstream_udp_send_done);
+    if (err < 0) {
+      LOG_E("uv_udp_send failed: %s", uv_strerror(err));
+      log_ipv6_and_port(s5_ctx->dst_addr, s5_ctx->dst_port, 
+          "uv_udp_send failed");
+
+      client_udp_recv_start((uv_stream_t *)sess->client_udp);
+    }
+
+  } else {
+    LOG_E("unknown ATYP: %d", s5_ctx->atyp);
+    client_udp_recv_start((uv_stream_t *)handle);
+  }
+}
+
+void on_upstream_udp_send_done(uv_udp_send_t* req, int status) {
+  LOG_I("udp package sent: %s", status == 0 ? "SUCCEEDED" : uv_strerror(status));
+  UDPSession *sess = container_of(req, UDPSession, upstream_udp_send_req);
+  client_udp_recv_start((uv_stream_t *)sess->client_udp);
+}
+
+int client_udp_recv_start(uv_stream_t *handle) {
+  UDPSession *sess = container_of(handle, UDPSession, client_udp);
+  return uv_udp_recv_start(sess->client_udp, on_client_udp_alloc, on_client_udp_recv_done);
+}
+
+void upstream_udp_send(uv_getaddrinfo_t* req, int status, struct addrinfo* res) {
+  UDPSession *sess = container_of(req, UDPSession, upstream_udp_addrinfo_req);
+  if (status < 0) {
+    LOG_E("getaddrinfo(\"%s\"): %s", sess->s5_ctx.dst_addr, uv_strerror(status));
+    uv_freeaddrinfo(res);
+    client_udp_recv_start((uv_stream_t *)sess->client_udp);
+    return;
+  }
+
+  char ipstr[INET6_ADDRSTRLEN];
+  IPAddr ipaddr;
+
+  int err;
+  for (struct addrinfo *ai = res; ai != NULL; ai = ai->ai_next) {
+    if (fill_ipaddr(&ipaddr, htons(sess->s5_ctx.dst_port), ipstr, sizeof(ipstr), ai) != 0) {
+      continue;
+    }
+
+    err = uv_udp_send(&sess->upstream_udp_send_req, sess->upstream_udp_send, 
+        (uv_buf_t *)req->data, 1, (struct sockaddr *)&ipaddr.addr,
+        on_upstream_udp_send_done);
+
+    if (err < 0) {
+      LOG_E("uv_udp_send to %s:%d failed: %s", ipstr, sess->s5_ctx.dst_port, 
+          uv_strerror(err));
+      continue;
+    }
+
+    break;
+  }
+
+  uv_freeaddrinfo(res);
+  client_udp_recv_start((uv_stream_t *)sess->client_udp);
 }

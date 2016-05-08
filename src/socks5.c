@@ -2,7 +2,7 @@
 #include "log/log.h"
 
 static S5Err socks5_parse_addr_and_port(Socks5Ctx *socks5_ctx, 
-    const char *data, int size);
+    const char *data, int size, int is_udp_req);
 
 S5Err socks5_parse_method_identification(Socks5Ctx *socks5_ctx, const char *data, int size) {
   socks5_ctx->state = S5_PARSE_STATE_VERSION;
@@ -45,7 +45,7 @@ S5Err socks5_parse_method_identification(Socks5Ctx *socks5_ctx, const char *data
         break;
 
       case S5_PARSE_STATE_FINISH:
-        LOG_E("junk in handshake: %d, - %d", i + 1, size);
+        LOG_E("junk in handshake: %d - %d", i + 1, size);
         return S5_JUNK_DATA_IN_HANDSHAKE;
         break;
 
@@ -87,7 +87,7 @@ S5Err socks5_parse_request(Socks5Ctx *socks5_ctx, const char *data, int size) {
         break;
 
       case S5_PARSE_STATE_REQ_RSV:
-        return socks5_parse_addr_and_port(socks5_ctx, data + i, size - i);
+        return socks5_parse_addr_and_port(socks5_ctx, data + i, size - i, 0);
 
       default:
         break;
@@ -104,15 +104,16 @@ S5Err socks5_parse_udp_request(Socks5Ctx *socks5_ctx, const char *data, int size
   }
 
   // the first 2 bytes is RSV, ignored, 3rd byte is FRAG
-  if (data[2] != 0) { // FRAG is not 0, while fragmentation is not support
+  // FRAG is not 0, while fragmentation is not supported, 
+  if (data[2] != 0) { 
     return S5_BAD_UDP_REQUEST;
   }
   
-  return socks5_parse_addr_and_port(socks5_ctx, data + 3, size - 3);
+  return socks5_parse_addr_and_port(socks5_ctx, data + 3, size - 3, 1);
 }
 
 S5Err socks5_parse_addr_and_port(Socks5Ctx *socks5_ctx, 
-    const char *data, int size) {
+    const char *data, int size, int is_udp_req) {
   socks5_ctx->state = S5_PARSE_STATE_REQ_ATYP;
 
   int i = 0;
@@ -167,12 +168,17 @@ S5Err socks5_parse_addr_and_port(Socks5Ctx *socks5_ctx,
 
         } else {
           socks5_ctx->dst_port |= c;
+
+          if (is_udp_req) {
+            return S5_OK;
+          }
+
           socks5_ctx->state = S5_PARSE_STATE_FINISH;
         }
         break;
 
       case S5_PARSE_STATE_FINISH:
-        LOG_E("junk in handshake: %d, - %d", i + 1, size);
+        LOG_E("junk in handshake: %d - %d", i + 1, size);
         return S5_JUN_DATA_IN_REQUEST;
         break;
 
