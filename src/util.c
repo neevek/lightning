@@ -33,3 +33,33 @@ int fill_ipaddr(IPAddr *ipaddr, int port,  char *ipstr,
 
   return 0;
 }
+
+void copy_ipv4_addr(uint32_t *intip, const char *ip) {
+  *intip = (ip[0] << 24) + (ip[1] << 16) + (ip[2] << 8) + ip[3];
+}
+
+int is_ipv4_addr_any(uint32_t ip) {
+  return ip == 0;
+}
+
+int is_ipv4_addr_local(uint32_t ip) {
+  return ip == 0x7f000001;
+}
+
+int is_ipv6_addr_any(const char *ip) {
+  for (int i = 0; i < 16; ++i) {
+    if (ip[i] != 0) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+int is_ipv6_addr_local(const char *ip) {
+  for (int i = 0; i < 15; ++i) {
+    if (ip[i] != 0) {
+      return 0;
+    }
+  }
+  return ip[15] == 1;
+}
