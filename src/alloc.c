@@ -12,3 +12,13 @@ void *lmalloc(size_t size) {
 
   return p;
 }
+
+void *lrealloc(void *p, size_t size) {
+  void *p2 = realloc(p, size);
+  if (!p2) {
+    fprintf(stderr, "realloc failed for: %lu\n", size);
+    exit(1);
+  }
+
+  return p2;
+}

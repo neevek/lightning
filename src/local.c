@@ -158,6 +158,7 @@ void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res)
 Session *create_session() {
   Session *sess = lmalloc(sizeof(Session));
   sess->state = S5_METHOD_IDENTIFICATION;
+  sess->type = SESSION_TYPE_UNKNOWN;
   return sess;
 }
 
@@ -183,12 +184,15 @@ int init_tcp_handle(Session *sess, uv_tcp_t **tcp_handle) {
 
 void close_session(Session *sess) {
   LOG_V("now will close session");
-  if (sess->upstream_tcp) {
-    uv_handle_t *handle = (uv_handle_t *)sess->upstream_tcp;
-    uv_read_stop((uv_stream_t *)handle);
+  if (sess->type == SESSION_TYPE_TCP) {
+    TCPSession *tcp_sess = (TCPSession *)sess;
+    if (tcp_sess->upstream_tcp) {
+      uv_handle_t *handle = (uv_handle_t *)tcp_sess->upstream_tcp;
+      uv_read_stop((uv_stream_t *)handle);
 
-    if (!uv_is_closing(handle)) {
-      uv_close(handle, tcp_handle_close_cb);
+      if (!uv_is_closing(handle)) {
+        uv_close(handle, tcp_handle_close_cb);
+      }
     }
   }
 
@@ -245,7 +249,7 @@ int client_write_error(uv_stream_t *handle, int err) {
   Session *sess = (Session *)handle->data;
 
   char buf[] = { 5, 1, 0, 1, 0, 0, 0, 0, 0, 0 };
-  sess->state = S5_STREAMING_END; // cause the session be closed in on_write_done_cb
+  sess->state = S5_SESSION_END; // cause the session be closed in on_write_done_cb
 
   switch(err) {
     case UV_ENETUNREACH: buf[1] = 3; break; // from the RFC: 3 = Network unreachable
@@ -279,13 +283,13 @@ int client_write_start(uv_stream_t *handle, const uv_buf_t *buf) {
 
 void on_client_write_done(uv_write_t *req, int status) {
   Session *sess = container_of(req, Session, client_write_req);
-  if (status < 0 || sess->state == S5_STREAMING_END) {
+  if (status < 0 || sess->state == S5_SESSION_END) {
     LOG_V("status=%d, now will close session", status);
     close_session(sess);
   } else {
     client_read_start((uv_stream_t *)sess->client_tcp);
-    if (sess->state == S5_STREAMING) {
-      upstream_read_start((uv_stream_t *)sess->upstream_tcp);
+    if (sess->type == SESSION_TYPE_TCP && sess->state == S5_STREAMING) {
+      upstream_read_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp);
     }
   }
 }
@@ -331,7 +335,7 @@ void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf
         LOG_V("socks5 method identification passed");
       } else {
         // this state causes the session be closed in on_write_done_cb
-        sess->state = S5_STREAMING_END;  
+        sess->state = S5_SESSION_END;  
         client_write_string(handle, "\5\xff", 2);
         LOG_V("socks5 method not supported");
       }
@@ -351,8 +355,27 @@ void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf
       return;
     }
 
+    // finished parsing the SOCKS request, now we know it is a 
+    // CONNECT or UDP ASSOCIATE request
+    sess->type = (s5_ctx->cmd == S5_CMD_UDP_ASSOCIATE ? 
+        SESSION_TYPE_UDP : SESSION_TYPE_TCP);
+
+    if (sess->type == SESSION_TYPE_UDP) {
+      sess = lrealloc(sess, sizeof(UDPSession));
+      // reset the session object to client_tcp, because the memory address
+      // may be changed after realloc
+      handle->data = sess;  
+      // TODO replay to the UDP ASSOCIATE request
+      return;
+    }
+
+    sess = lrealloc(sess, sizeof(TCPSession));
+    // reset the session object to client_tcp, because the memory address
+    // may be changed after realloc
+    handle->data = sess;
+
     int err;
-    if ((err = init_tcp_handle(sess, &sess->upstream_tcp)) < 0) {
+    if ((err = init_tcp_handle(sess, &((TCPSession *)sess)->upstream_tcp)) < 0) {
       client_write_error(handle, err);
       return;
     }
@@ -364,7 +387,7 @@ void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf
       memcpy(&addr4.sin_addr.s_addr, s5_ctx->dst_addr, 4);
 
       int err;
-      if ((err = upstream_connect(&sess->upstream_connect_req, 
+      if ((err = upstream_connect(&((TCPSession *)sess)->upstream_connect_req, 
               (IPAddr *)&addr4)) != 0) {
         log_ipv4_and_port(s5_ctx->dst_addr, s5_ctx->dst_port, 
             "upstream connect failed");
@@ -380,7 +403,7 @@ void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf
 
       int err;
       if ((err = uv_getaddrinfo(g_loop, 
-            &sess->upstream_addrinfo_req, 
+            &((TCPSession *)sess)->upstream_addrinfo_req, 
             upstream_connect_domain, 
             (const char *)s5_ctx->dst_addr, 
             NULL, 
@@ -399,7 +422,7 @@ void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf
       memcpy(&addr6.sin6_addr.s6_addr, s5_ctx->dst_addr, 16);
 
       int err;
-      if ((err = upstream_connect(&sess->upstream_connect_req, 
+      if ((err = upstream_connect(&((TCPSession *)sess)->upstream_connect_req, 
               (IPAddr *)&addr6)) != 0) {
         log_ipv6_and_port(s5_ctx->dst_addr, s5_ctx->dst_port, 
             "upstream connect failed");
@@ -413,7 +436,7 @@ void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf
 
   } else if (sess->state == S5_STREAMING) { 
     ((uv_buf_t *)buf)->len = nread;
-    upstream_write_start((uv_stream_t *)sess->upstream_tcp, buf);
+    upstream_write_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp, buf);
 
   } else {
     // unreachable code
@@ -434,7 +457,7 @@ int upstream_read_start(uv_stream_t *handle) {
 }
 
 void on_upstream_conn_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
-  Session *sess = (Session *)handle->data;
+  TCPSession *sess = (TCPSession *)handle->data;
   buf->base = sess->upstream_buf;
   buf->len = sizeof(sess->upstream_buf);
 }
@@ -448,7 +471,7 @@ void on_upstream_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *b
   uv_read_stop(handle);
 
   Session *sess = (Session *)handle->data;
-  if (nread < 0 || sess->state == S5_STREAMING_END) {
+  if (nread < 0 || sess->state == S5_SESSION_END) {
     LOG_V("upstream read failed: %s", uv_strerror(nread));
     close_session(sess);
     return;
@@ -459,28 +482,28 @@ void on_upstream_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *b
 }
 
 int upstream_write_start(uv_stream_t *handle, const uv_buf_t *buf) {
-  Session *sess = (Session *)handle->data;
+  TCPSession *sess = (TCPSession *)handle->data;
   int err;
   if ((err = uv_write(&sess->upstream_write_req, (uv_stream_t *)handle, 
           buf, 1, on_upstream_write_done)) != 0) {
     LOG_E("uv_write failed: %s", uv_strerror(err));
-    close_session(sess);
+    close_session((Session *)sess);
   }
   return err;
 }
 
 void on_upstream_write_done(uv_write_t *req, int status) {
-  Session *sess = container_of(req, Session, upstream_write_req);
-  if (status < 0 || sess->state == S5_STREAMING_END) {
+  TCPSession *sess = container_of(req, TCPSession, upstream_write_req);
+  if (status < 0 || sess->state == S5_SESSION_END) {
     LOG_V("upstream write failed: %s", uv_strerror(status));
-    close_session(sess);
+    close_session((Session *)sess);
   } else {
     client_read_start((uv_stream_t *)sess->client_tcp);
   }
 }
 
 void upstream_connect_domain(uv_getaddrinfo_t* req, int status, struct addrinfo* res) {
-  Session *sess = container_of(req, Session, upstream_addrinfo_req);
+  TCPSession *sess = container_of(req, TCPSession, upstream_addrinfo_req);
   if (status < 0) {
     LOG_E("getaddrinfo(\"%s\"): %s", sess->s5_ctx.dst_addr, uv_strerror(status));
     uv_freeaddrinfo(res);
@@ -525,23 +548,23 @@ void upstream_connect_domain(uv_getaddrinfo_t* req, int status, struct addrinfo*
 }
 
 void upstream_connect_cb(uv_connect_t* req, int status) {
-  Session *sess = container_of(req, Session, upstream_connect_req);
+  TCPSession *sess = container_of(req, TCPSession, upstream_connect_req);
 
-  upstream_connect_log(sess, status);
+  upstream_connect_log((Session *)sess, status);
   if (status < 0) {
     if ((intptr_t)req->data) {
       client_write_error((uv_stream_t *)sess->client_tcp, status); 
     }
   } else {
-    finish_socks5_handshake(sess);
+    finish_socks5_handshake((Session *)sess);
   }
 }
 
 void finish_socks5_handshake(Session *sess) {
   IPAddr ipaddr;
   int err;
-  if ((err = uv_tcp_getsockname(sess->upstream_tcp, &ipaddr.addr, 
-          (int []){ sizeof(ipaddr) })) < 0) {
+  if ((err = uv_tcp_getsockname(((TCPSession *)sess)->upstream_tcp, 
+          &ipaddr.addr, (int []){ sizeof(ipaddr) })) < 0) {
     LOG_W("uv_tcp_getsockname failed: %s", uv_strerror(err));
     client_write_error((uv_stream_t *)sess->client_tcp, err);
     return;
@@ -596,7 +619,7 @@ void upstream_connect_log(Session *sess, int status) {
 }
 
 int upstream_connect(uv_connect_t* req, IPAddr *ipaddr) {
-  Session *sess = container_of(req, Session, upstream_connect_req);
+  TCPSession *sess = container_of(req, TCPSession, upstream_connect_req);
 
   int err;
   if ((err = uv_tcp_connect(req, sess->upstream_tcp, &ipaddr->addr, upstream_connect_cb)) != 0) {

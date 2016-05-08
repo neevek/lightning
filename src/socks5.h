@@ -25,6 +25,12 @@ typedef enum {
 } Socks5Atyp;
 
 typedef enum {
+  S5_CMD_CONNECT = 1,
+  S5_CMD_BIND = 2,
+  S5_CMD_UDP_ASSOCIATE = 3,
+} S5Command;
+
+typedef enum {
   S5_AUTH_NONE =   1 << 0,
   S5_AUTH_GSSAPI = 1 << 1,
   S5_AUTH_PASSWD = 1 << 2
@@ -37,6 +43,7 @@ typedef enum {
   S5_JUN_DATA_IN_REQUEST = 3,
   S5_UNSUPPORTED_CMD = 4,
   S5_BAD_ATYP = 5,
+  S5_BAD_UDP_REQUEST = 6,
 } S5Err;
 
 typedef struct {
@@ -52,5 +59,6 @@ typedef struct {
 
 S5Err socks5_parse_method_identification(Socks5Ctx *socks5_ctx, const char *data, int size);
 S5Err socks5_parse_request(Socks5Ctx *socks5_ctx, const char *data, int size);
+S5Err socks5_parse_udp_request(Socks5Ctx *socks5_ctx, const char *data, int size);
 
 #endif /* end of include guard: SOCKS5_H_ */

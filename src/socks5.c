@@ -1,6 +1,9 @@
 #include "socks5.h"
 #include "log/log.h"
 
+static S5Err socks5_parse_addr_and_port(Socks5Ctx *socks5_ctx, 
+    const char *data, int size);
+
 S5Err socks5_parse_method_identification(Socks5Ctx *socks5_ctx, const char *data, int size) {
   socks5_ctx->state = S5_PARSE_STATE_VERSION;
 
@@ -62,6 +65,8 @@ S5Err socks5_parse_request(Socks5Ctx *socks5_ctx, const char *data, int size) {
   int i = 0;
   while (i < size) {
     unsigned char c = data[i];
+    ++i;
+
     switch(socks5_ctx->state) {
       case S5_PARSE_STATE_REQ_VERSION:
         if (c != SOCKS5_VERSION) {
@@ -72,7 +77,7 @@ S5Err socks5_parse_request(Socks5Ctx *socks5_ctx, const char *data, int size) {
         break;
 
       case S5_PARSE_STATE_REQ_CMD:
-        if (c != 1) { // we only support CONNECT
+        if (c != S5_CMD_CONNECT && c != S5_CMD_UDP_ASSOCIATE) {
           LOG_E("unsupported cmd: %d", c);
           return S5_UNSUPPORTED_CMD;
         }
@@ -82,9 +87,40 @@ S5Err socks5_parse_request(Socks5Ctx *socks5_ctx, const char *data, int size) {
         break;
 
       case S5_PARSE_STATE_REQ_RSV:
-        socks5_ctx->state = S5_PARSE_STATE_REQ_ATYP;
-        break;
+        return socks5_parse_addr_and_port(socks5_ctx, data + i, size - i);
 
+      default:
+        break;
+    }
+
+  }
+
+  return S5_OK;
+}
+
+S5Err socks5_parse_udp_request(Socks5Ctx *socks5_ctx, const char *data, int size) {
+  if (size < 3) {
+    return S5_BAD_UDP_REQUEST;
+  }
+
+  // the first 2 bytes is RSV, ignored, 3rd byte is FRAG
+  if (data[2] != 0) { // FRAG is not 0, while fragmentation is not support
+    return S5_BAD_UDP_REQUEST;
+  }
+  
+  return socks5_parse_addr_and_port(socks5_ctx, data + 3, size - 3);
+}
+
+S5Err socks5_parse_addr_and_port(Socks5Ctx *socks5_ctx, 
+    const char *data, int size) {
+  socks5_ctx->state = S5_PARSE_STATE_REQ_ATYP;
+
+  int i = 0;
+  while (i < size) {
+    unsigned char c = data[i];
+    ++i;
+
+    switch(socks5_ctx->state) {
       case S5_PARSE_STATE_REQ_ATYP:
         socks5_ctx->atyp = c;
         socks5_ctx->arg_index = 0;
@@ -143,8 +179,6 @@ S5Err socks5_parse_request(Socks5Ctx *socks5_ctx, const char *data, int size) {
       default:
         break;
     }
-
-    ++i;
   }
 
   return S5_OK;
