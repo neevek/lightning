@@ -33,12 +33,6 @@ typedef struct ServerContext {
   ServerCfg server_cfg;
 } ServerContext;
 
-typedef union {
-  struct sockaddr addr;
-  struct sockaddr_in addr4;
-  struct sockaddr_in6 addr6;
-} IPAddr;
-
 static void start_server(const char *host, int local_port, int backlog);
 static void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res);
 static void on_connection_new(uv_stream_t *server, int status);
@@ -116,18 +110,8 @@ void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res)
   char ipstr[INET6_ADDRSTRLEN];
 
   for (struct addrinfo *ai = res; ai != NULL; ai = ai->ai_next) {
-    if (ai->ai_family == AF_INET) {
-      ipaddr.addr4 = *(struct sockaddr_in *)ai->ai_addr;
-      ipaddr.addr4.sin_port = htons(g_server_ctx->server_cfg.local_port);
-      uv_inet_ntop(ipaddr.addr.sa_family, &ipaddr.addr4.sin_addr, ipstr, sizeof(ipstr));
-
-    } else if (ai->ai_family == AF_INET6) {
-      ipaddr.addr6 = *(struct sockaddr_in6 *)ai->ai_addr;
-      ipaddr.addr6.sin6_port = htons(g_server_ctx->server_cfg.local_port);
-      uv_inet_ntop(ipaddr.addr.sa_family, &ipaddr.addr6.sin6_addr, ipstr, sizeof(ipstr));
-
-    } else {
-      LOG_W("unexpected ai_family: %d", ai->ai_family);
+    if (fill_ipaddr(&ipaddr, htons(g_server_ctx->server_cfg.local_port), 
+          ipstr, sizeof(ipstr), ai) != 0) {
       continue;
     }
 
@@ -365,6 +349,8 @@ void on_client_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf
       // reset the session object to client_tcp, because the memory address
       // may be changed after realloc
       handle->data = sess;  
+
+
       // TODO replay to the UDP ASSOCIATE request
       return;
     }
@@ -516,18 +502,7 @@ void upstream_connect_domain(uv_getaddrinfo_t* req, int status, struct addrinfo*
 
   int err;
   for (struct addrinfo *ai = res; ai != NULL; ai = ai->ai_next) {
-    if (ai->ai_family == AF_INET) {
-      ipaddr.addr4 = *(struct sockaddr_in *)ai->ai_addr;
-      ipaddr.addr4.sin_port = htons(sess->s5_ctx.dst_port);
-      uv_inet_ntop(ipaddr.addr.sa_family, &ipaddr.addr4.sin_addr, ipstr, sizeof(ipstr));
-
-    } else if (ai->ai_family == AF_INET6) {
-      ipaddr.addr6 = *(struct sockaddr_in6 *)ai->ai_addr;
-      ipaddr.addr6.sin6_port = htons(sess->s5_ctx.dst_port);
-      uv_inet_ntop(ipaddr.addr.sa_family, &ipaddr.addr6.sin6_addr, ipstr, sizeof(ipstr));
-
-    } else {
-      LOG_W("unexpected ai_family: %d", ai->ai_family);
+    if (fill_ipaddr(&ipaddr, htons(sess->s5_ctx.dst_port), ipstr, sizeof(ipstr), ai) != 0) {
       continue;
     }
 
