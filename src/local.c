@@ -46,6 +46,7 @@ static int init_udp_handle(Session *sess, uv_udp_t **udp_handle);
 static Session *create_session();
 static int init_tcp_handle(Session *sess, uv_tcp_t **tcp_handle);
 static void close_session(Session *sess);
+static void close_handle(uv_handle_t *handle);
 static void handle_close_cb(uv_handle_t *handle);
 static void finish_socks5_tcp_handshake(Session *sess);
 static void finish_socks5_udp_handshake(Session *sess);
@@ -215,53 +216,33 @@ void close_session(Session *sess) {
   LOG_V("now will close session");
   if (sess->type == SESSION_TYPE_TCP) {
     TCPSession *tcp_sess = (TCPSession *)sess;
-    if (tcp_sess->upstream_tcp) {
-      uv_handle_t *handle = (uv_handle_t *)tcp_sess->upstream_tcp;
-      uv_read_stop((uv_stream_t *)handle);
+    close_handle((uv_handle_t *)tcp_sess->upstream_tcp);
 
-      if (!uv_is_closing(handle)) {
-        uv_close(handle, handle_close_cb);
-      }
-    }
   } else if (sess->type == SESSION_TYPE_UDP) {
     UDPSession *udp_sess = (UDPSession *)sess;
-    if (udp_sess->client_udp) {
-      uv_handle_t *handle = (uv_handle_t *)udp_sess->client_udp;
-      uv_udp_recv_stop(udp_sess->client_udp);
-
-      if (!uv_is_closing(handle)) {
-        uv_close(handle, handle_close_cb);
-      }
-    }
-
-    if (udp_sess->upstream_udp) {
-      uv_handle_t *handle = (uv_handle_t *)udp_sess->upstream_udp;
-      uv_udp_recv_stop(udp_sess->upstream_udp);
-
-      if (!uv_is_closing(handle)) {
-        uv_close(handle, handle_close_cb);
-      }
-    }
-
-    if (udp_sess->client_udp_send) {
-      uv_handle_t *handle = (uv_handle_t *)udp_sess->client_udp_send;
-      uv_udp_recv_stop(udp_sess->client_udp_send);
-
-      if (!uv_is_closing(handle)) {
-        uv_close(handle, handle_close_cb);
-      }
-    }
+    close_handle((uv_handle_t *)udp_sess->client_udp);
+    close_handle((uv_handle_t *)udp_sess->upstream_udp);
+    close_handle((uv_handle_t *)udp_sess->client_udp);
+    close_handle((uv_handle_t *)udp_sess->client_udp_send);
   }
 
-  if (sess->client_tcp) {
-    uv_handle_t *handle = (uv_handle_t *)sess->client_tcp;
-    uv_read_stop((uv_stream_t *)handle);
+  close_handle((uv_handle_t *)sess->client_tcp);
+
+  free(sess);
+}
+
+void close_handle(uv_handle_t *handle) {
+  if (handle) {
+    if (handle->type == UV_TCP) {
+      uv_read_stop((uv_stream_t *)handle);
+    } else if (handle->type == UV_UDP) {
+      uv_udp_recv_stop((uv_udp_t *)handle);
+    }
+
     if (!uv_is_closing(handle)) {
       uv_close(handle, handle_close_cb);
     }
   }
-
-  free(sess);
 }
 
 void handle_close_cb(uv_handle_t *handle) {
