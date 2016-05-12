@@ -45,16 +45,17 @@ typedef struct {
 typedef struct {
   SESSION_FIELDS
 
-  uv_udp_t *client_udp;
-  char client_udp_buf[SESSION_UDP_BUFSIZ]; 
+  uv_udp_t *client_udp_recv;
+  char clinet_udp_recv_buf[SESSION_UDP_BUFSIZ]; 
 
   uv_udp_t *upstream_udp;
   uv_udp_send_t upstream_udp_send_req;
+  uv_getaddrinfo_t upstream_udp_addrinfo_req;
   char upstream_udp_buf[SESSION_UDP_BUFSIZ]; 
 
   uv_udp_t *client_udp_send;
   uv_udp_send_t client_udp_send_req;
-  uv_getaddrinfo_t upstream_udp_addrinfo_req;
+  uv_getaddrinfo_t client_udp_addrinfo_req;
 } UDPSession;
 
 #endif /* end of include guard: DEFS_H_ */

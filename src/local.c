@@ -83,7 +83,9 @@ static void on_client_udp_send_done(uv_udp_send_t* req, int status);
 static int client_udp_recv_start(UDPSession *sess);
 static void upstream_udp_send(uv_getaddrinfo_t* req, int status, 
     struct addrinfo* res);
-static void bind_client_udp_send_if_needed(UDPSession *sess);
+static void init_client_udp_send_if_needed(UDPSession *sess);
+static void client_udp_send_domain_resolved(uv_getaddrinfo_t* req, int status, 
+    struct addrinfo* res);
 
 int main(int argc, const char *argv[]) {
   start_server(SERVER_HOST, SERVER_PORT, SERVER_BACKLOG);
@@ -144,7 +146,7 @@ void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res)
 
     } else if (ai->ai_family == AF_INET6) {
       g_server_ctx->bound_ip_version = IPV6;
-      memcpy(g_server_ctx->bound_ip, &ipaddr.addr6.sin6_addr.s6_addr, 16);
+      memcpy(g_server_ctx->bound_ip, ipaddr.addr6.sin6_addr.s6_addr, 16);
     }
 
     int err;
@@ -220,9 +222,9 @@ void close_session(Session *sess) {
 
   } else if (sess->type == SESSION_TYPE_UDP) {
     UDPSession *udp_sess = (UDPSession *)sess;
-    close_handle((uv_handle_t *)udp_sess->client_udp);
+    close_handle((uv_handle_t *)udp_sess->client_udp_recv);
     close_handle((uv_handle_t *)udp_sess->upstream_udp);
-    close_handle((uv_handle_t *)udp_sess->client_udp);
+    close_handle((uv_handle_t *)udp_sess->client_udp_recv);
     close_handle((uv_handle_t *)udp_sess->client_udp_send);
   }
 
@@ -463,7 +465,7 @@ void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t 
       struct sockaddr_in6 addr6;
       addr6.sin6_family = AF_INET6;
       addr6.sin6_port = htons(s5_ctx->dst_port);
-      memcpy(&addr6.sin6_addr.s6_addr, s5_ctx->dst_addr, 16);
+      memcpy(addr6.sin6_addr.s6_addr, s5_ctx->dst_addr, 16);
 
       int err;
       if ((err = upstream_tcp_connect(&((TCPSession *)sess)->upstream_connect_req, 
@@ -618,73 +620,80 @@ void finish_socks5_udp_handshake(Session *sess) {
     ipaddr.addr4.sin_port = 0;
   } else {
     ipaddr.addr6.sin6_family = AF_INET6;
-    memcpy(&ipaddr.addr6.sin6_addr.s6_addr, g_server_ctx->bound_ip, 16);
+    memcpy(ipaddr.addr6.sin6_addr.s6_addr, g_server_ctx->bound_ip, 16);
     ipaddr.addr6.sin6_port = 0;
   }
 
   UDPSession *udp_sess = (UDPSession *)sess;
   init_udp_handle(sess, &udp_sess->upstream_udp);
-  init_udp_handle(sess, &udp_sess->client_udp);
-  uv_udp_bind(udp_sess->client_udp, &ipaddr.addr, UV_UDP_REUSEADDR);
+  init_udp_handle(sess, &udp_sess->client_udp_recv);
+  uv_udp_bind(udp_sess->client_udp_recv, &ipaddr.addr, UV_UDP_REUSEADDR);
 
-  bind_client_udp_send_if_needed(udp_sess);
+  init_client_udp_send_if_needed(udp_sess);
 
   // get the bound port and send it to the client, so the client
   // can send us UDP datagrams on this port
-  if ((err = uv_udp_getsockname(udp_sess->client_udp, &ipaddr.addr, 
+  if ((err = uv_udp_getsockname(udp_sess->client_udp_recv, &ipaddr.addr, 
           (int []){ sizeof(ipaddr) })) < 0) {
     LOG_W("uv_udp_getsockname failed: %s", uv_strerror(err));
     client_tcp_write_error((uv_stream_t *)sess->client_tcp, err);
     return;
   }
 
-  uv_udp_recv_start(udp_sess->client_udp, on_client_udp_alloc, on_client_udp_recv_done);
+  uv_udp_recv_start(udp_sess->client_udp_recv, on_client_udp_alloc, on_client_udp_recv_done);
 
   finish_socks5_handshake(sess, &ipaddr);
 }
 
-void bind_client_udp_send_if_needed(UDPSession *sess) {
+void init_client_udp_send_if_needed(UDPSession *sess) {
   Socks5Ctx *s5_ctx = &sess->s5_ctx;
   if (s5_ctx->dst_port == 0) {
     return;
   }
 
-  IPAddr ipaddr;
+  if (s5_ctx->atyp == S5_ATYP_DOMAIN) {
+    struct addrinfo hint;
+    memset(&hint, 0, sizeof(hint));
+    hint.ai_family = AF_UNSPEC;
+    hint.ai_socktype = SOCK_DGRAM;
+    hint.ai_protocol = IPPROTO_UDP;
+
+    int err;
+    if ((err = uv_getaddrinfo(g_loop, 
+            &((UDPSession *)sess)->client_udp_addrinfo_req, 
+            client_udp_send_domain_resolved,
+            (const char *)s5_ctx->dst_addr, 
+            NULL, 
+            &hint)) < 0) {
+
+      LOG_E("uv_getaddrinfo failed: %s, err: %s", 
+          s5_ctx->dst_addr, uv_strerror(err));
+    }
+    return;
+  } 
+
   if (s5_ctx->atyp == S5_ATYP_IPV4) {
-    copy_ipv4_addr(&ipaddr.addr4.sin_addr.s_addr, (char *)s5_ctx->dst_addr);
-    if (is_ipv4_addr_any(ipaddr.addr4.sin_addr.s_addr)) {
+    if (is_ipv4_addr_any((const char *)s5_ctx->dst_addr)) {
       return;
     }
-
 #ifdef IGNORE_LOCAL_UDP_RELAY
-    if (is_ipv4_addr_local(ipaddr.addr4.sin_addr.s_addr)) {
+    if (is_ipv4_addr_local((const char *)s5_ctx->dst_addr)) {
       return;
     }
 #endif
-
-    ipaddr.addr4.sin_family = AF_INET;
-    ipaddr.addr4.sin_port = s5_ctx->dst_port;;
 
   } else if (s5_ctx->atyp == S5_ATYP_IPV6) {
-    memcpy(ipaddr.addr6.sin6_addr.s6_addr, s5_ctx->dst_addr, 16);
-
-    if (is_ipv6_addr_any((const char *)ipaddr.addr6.sin6_addr.s6_addr)) {
+    if (is_ipv6_addr_any((const char *)s5_ctx->dst_addr)) {
       return;
     }
-
 #ifdef IGNORE_LOCAL_UDP_RELAY
-    if (is_ipv6_addr_local((const char *)ipaddr.addr6.sin6_addr.s6_addr))) {
+    if (is_ipv6_addr_local((const char *)s5_ctx->dst_addr))) {
       return;
     }
 #endif
-
-    ipaddr.addr6.sin6_family = AF_INET6;
-    ipaddr.addr6.sin6_port = s5_ctx->dst_port;;
-  }
-
+  } else 
 
   init_udp_handle((Session *)sess, &sess->client_udp_send);
-  uv_udp_bind(sess->client_udp_send, &ipaddr.addr, UV_UDP_REUSEADDR);
 }
 
 void finish_socks5_handshake(Session *sess, IPAddr *ipaddr) {
@@ -739,8 +748,8 @@ int upstream_tcp_connect(uv_connect_t* req, IPAddr *ipaddr) {
 
 void on_client_udp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
   UDPSession *sess = (UDPSession *)handle->data;
-  buf->base = sess->client_udp_buf;
-  buf->len = sizeof(sess->client_udp_buf);
+  buf->base = sess->clinet_udp_recv_buf;
+  buf->len = sizeof(sess->clinet_udp_recv_buf);
 }
 
 void on_client_udp_recv_done(uv_udp_t* handle, ssize_t nread, 
@@ -809,7 +818,7 @@ void on_client_udp_recv_done(uv_udp_t* handle, ssize_t nread,
     struct sockaddr_in6 addr6;
     addr6.sin6_family = AF_INET6;
     addr6.sin6_port = htons(s5_ctx->dst_port);
-    memcpy(&addr6.sin6_addr.s6_addr, s5_ctx->dst_addr, 16);
+    memcpy(addr6.sin6_addr.s6_addr, s5_ctx->dst_addr, 16);
 
     err = uv_udp_send(&sess->upstream_udp_send_req, sess->upstream_udp, 
         buf, 1, (struct sockaddr *)&addr6, on_upstream_udp_send_done);
@@ -834,7 +843,7 @@ void on_upstream_udp_send_done(uv_udp_send_t* req, int status) {
 }
 
 int client_udp_recv_start(UDPSession *sess) {
-  int err = uv_udp_recv_start(sess->client_udp, on_client_udp_alloc, 
+  int err = uv_udp_recv_start(sess->client_udp_recv, on_client_udp_alloc, 
       on_client_udp_recv_done);
   if (err < 0) {
     LOG_E("uv_udp_recv_start failed: %s", uv_strerror(err));
@@ -977,4 +986,38 @@ void on_upstream_udp_recv_done(uv_udp_t* handle, ssize_t nread,
 void on_client_udp_send_done(uv_udp_send_t* req, int status) {
   LOG_I("client_udp_send status: %s", status == 0 ? 
       "SUCCEEDED" : uv_strerror(status));
+}
+
+void client_udp_send_domain_resolved(uv_getaddrinfo_t* req, int status, 
+    struct addrinfo* res) {
+  UDPSession *sess = container_of(req, UDPSession, client_udp_addrinfo_req);
+
+  if (status < 0) {
+    LOG_E("getaddrinfo(\"%s\"): %s", sess->s5_ctx.dst_addr, uv_strerror(status));
+    uv_freeaddrinfo(res);
+    return;
+  }
+  
+  for (struct addrinfo *ai = res; ai != NULL; ai = ai->ai_next) {
+    LOG_V("domain [%s] resolved", sess->s5_ctx.dst_addr);
+
+    if (ai->ai_family == AF_INET) {
+      struct sockaddr_in *sai = (struct sockaddr_in *)ai->ai_addr;
+      sess->s5_ctx.atyp = S5_ATYP_IPV4;
+      sess->s5_ctx.dst_addr[0] = (sai->sin_addr.s_addr >> 24) & 0xff;
+      sess->s5_ctx.dst_addr[1] = (sai->sin_addr.s_addr >> 16) & 0xff;
+      sess->s5_ctx.dst_addr[2] = (sai->sin_addr.s_addr >> 8) & 0xff;
+      sess->s5_ctx.dst_addr[3] = sai->sin_addr.s_addr & 0xff;
+
+    } else if (ai->ai_family == AF_INET6) {
+      struct sockaddr_in6 *sai6 = (struct sockaddr_in6 *)ai->ai_addr;
+      sess->s5_ctx.atyp = S5_ATYP_IPV6;
+      memcpy(sess->s5_ctx.dst_addr, sai6->sin6_addr.s6_addr, 16);
+    }
+
+    init_udp_handle((Session *)sess, &sess->client_udp_send);
+    break;
+  }
+
+  uv_freeaddrinfo(res);
 }
