@@ -9,7 +9,6 @@
 #define SERVER_HOST "127.0.0.1"
 #define SERVER_PORT 8789
 #define SERVER_BACKLOG 256
-#define SESSION_DATA_BUFSIZ 2048
 #define KEEPALIVE 60
 
 struct ServerContext;
@@ -59,6 +58,10 @@ static int client_tcp_write_error(uv_stream_t *handle, int err);
 static void on_client_tcp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf);
 static void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf);
 static void on_client_tcp_write_done(uv_write_t *req, int status);
+static void handle_socks5_method_identification(uv_stream_t *handle, 
+    ssize_t nread, const uv_buf_t *buf, Session *sess);
+static void handle_socks5_request(uv_stream_t *handle, 
+    ssize_t nread, const uv_buf_t *buf, Session *sess);
 
 static void upstream_tcp_connect_domain(uv_getaddrinfo_t* req, int status, 
     struct addrinfo* res);
@@ -234,16 +237,18 @@ void close_session(Session *sess) {
 }
 
 void close_handle(uv_handle_t *handle) {
-  if (handle) {
-    if (handle->type == UV_TCP) {
-      uv_read_stop((uv_stream_t *)handle);
-    } else if (handle->type == UV_UDP) {
-      uv_udp_recv_stop((uv_udp_t *)handle);
-    }
+  if (handle == NULL) {
+    return;
+  }
 
-    if (!uv_is_closing(handle)) {
-      uv_close(handle, handle_close_cb);
-    }
+  if (handle->type == UV_TCP) {
+    uv_read_stop((uv_stream_t *)handle);
+  } else if (handle->type == UV_UDP) {
+    uv_udp_recv_stop((uv_udp_t *)handle);
+  }
+
+  if (!uv_is_closing(handle)) {
+    uv_close(handle, handle_close_cb);
   }
 }
 
@@ -357,6 +362,24 @@ void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t 
   }
 
   if (sess->state == S5_METHOD_IDENTIFICATION) {
+    handle_socks5_method_identification(handle, nread, buf, sess);
+
+  } else if (sess->state == S5_REQUEST) {
+    handle_socks5_request(handle, nread, buf, sess);
+
+  } else if (sess->state == S5_STREAMING) { 
+    ((uv_buf_t *)buf)->len = nread;
+    upstream_tcp_write_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp, buf);
+
+  } else {
+    // unreachable code
+    LOG_W("unepxected state: %d", sess->state);
+    close_session(sess);
+  }
+}
+
+void handle_socks5_method_identification(uv_stream_t *handle, ssize_t nread, 
+    const uv_buf_t *buf, Session *sess) {
     Socks5Ctx *s5_ctx = &sess->s5_ctx;
 
     S5Err s5_err = socks5_parse_method_identification(s5_ctx, buf->base, nread);
@@ -384,110 +407,102 @@ void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t 
       // need more data
       client_tcp_read_start((uv_stream_t *)handle);
     }
+}
 
-  } else if (sess->state == S5_REQUEST) {
-    Socks5Ctx *s5_ctx = &sess->s5_ctx;
+void handle_socks5_request(uv_stream_t *handle, ssize_t nread, 
+    const uv_buf_t *buf, Session *sess) {
+  Socks5Ctx *s5_ctx = &sess->s5_ctx;
 
-    S5Err s5_err = socks5_parse_request(s5_ctx, buf->base, nread); 
-    if (s5_err != S5_OK) {
-      LOG_E("socks5_parse_request failed");
-      client_tcp_write_error(handle, s5_err);
-      return;
-    }
+  S5Err s5_err = socks5_parse_request(s5_ctx, buf->base, nread); 
+  if (s5_err != S5_OK) {
+    LOG_E("socks5_parse_request failed");
+    client_tcp_write_error(handle, s5_err);
+    return;
+  }
 
-    // finished parsing the SOCKS request, now we know it is a 
-    // CONNECT or UDP ASSOCIATE request
-    sess->type = (s5_ctx->cmd == S5_CMD_UDP_ASSOCIATE ? 
-        SESSION_TYPE_UDP : SESSION_TYPE_TCP);
+  // finished parsing the SOCKS request, now we know it is a 
+  // CONNECT or UDP ASSOCIATE request
+  sess->type = (s5_ctx->cmd == S5_CMD_UDP_ASSOCIATE ? 
+      SESSION_TYPE_UDP : SESSION_TYPE_TCP);
 
-    if (sess->type == SESSION_TYPE_UDP) {
-      LOG_V("received a UDP request");
+  if (sess->type == SESSION_TYPE_UDP) {
+    LOG_V("received a UDP request");
 
-      sess = lrealloc(sess, sizeof(UDPSession));
-      memset(((char *)sess)+sizeof(Session), 0, sizeof(UDPSession)-sizeof(Session));
-      // reset the session object for client_tcp, because the memory address
-      // may be changed after realloc
-      handle->data = sess;  
+    sess = lrealloc(sess, sizeof(UDPSession));
+    memset(((char *)sess)+sizeof(Session), 0, sizeof(UDPSession)-sizeof(Session));
+    // re-assign the session object for client_tcp, because the memory address
+    // may have been changed after realloc
+    handle->data = sess;  
 
-      finish_socks5_udp_handshake(sess);
-      return;
-    }
+    finish_socks5_udp_handshake(sess);
+    return;
+  }
 
-    // alright, it is a CONNECT request
-    sess = lrealloc(sess, sizeof(TCPSession));
-    memset(((char *)sess)+sizeof(Session), 0, sizeof(TCPSession)-sizeof(Session));
-    // reset the session object for client_tcp, because the memory address
-    // may be changed after realloc
-    handle->data = sess;
+  // alright, it is a CONNECT request
+  sess = lrealloc(sess, sizeof(TCPSession));
+  memset(((char *)sess)+sizeof(Session), 0, sizeof(TCPSession)-sizeof(Session));
+  // re-assign the session object for client_tcp, because the memory address
+  // may have been changed after realloc
+  handle->data = sess;
+
+  int err;
+  if ((err = init_tcp_handle(sess, &((TCPSession *)sess)->upstream_tcp)) < 0) {
+    client_tcp_write_error(handle, err);
+    return;
+  }
+
+  if (s5_ctx->atyp == S5_ATYP_IPV4) {
+    struct sockaddr_in addr4;
+    addr4.sin_family = AF_INET;
+    addr4.sin_port = htons(s5_ctx->dst_port);
+    memcpy(&addr4.sin_addr.s_addr, s5_ctx->dst_addr, 4);
 
     int err;
-    if ((err = init_tcp_handle(sess, &((TCPSession *)sess)->upstream_tcp)) < 0) {
-      client_tcp_write_error(handle, err);
-      return;
+    if ((err = upstream_tcp_connect(&((TCPSession *)sess)->upstream_connect_req, 
+            (IPAddr *)&addr4)) != 0) {
+      log_ipv4_and_port(s5_ctx->dst_addr, s5_ctx->dst_port, 
+          "upstream connect failed");
+      client_tcp_write_error((uv_stream_t *)sess->client_tcp, err); 
     }
 
-    if (s5_ctx->atyp == S5_ATYP_IPV4) {
-      struct sockaddr_in addr4;
-      addr4.sin_family = AF_INET;
-      addr4.sin_port = htons(s5_ctx->dst_port);
-      memcpy(&addr4.sin_addr.s_addr, s5_ctx->dst_addr, 4);
+  } else if (s5_ctx->atyp == S5_ATYP_DOMAIN) {
+    struct addrinfo hint;
+    memset(&hint, 0, sizeof(hint));
+    hint.ai_family = AF_UNSPEC;
+    hint.ai_socktype = SOCK_STREAM;
+    hint.ai_protocol = IPPROTO_TCP;
 
-      int err;
-      if ((err = upstream_tcp_connect(&((TCPSession *)sess)->upstream_connect_req, 
-              (IPAddr *)&addr4)) != 0) {
-        log_ipv4_and_port(s5_ctx->dst_addr, s5_ctx->dst_port, 
-            "upstream connect failed");
-        client_tcp_write_error((uv_stream_t *)sess->client_tcp, err); 
-      }
-
-    } else if (s5_ctx->atyp == S5_ATYP_DOMAIN) {
-      struct addrinfo hint;
-      memset(&hint, 0, sizeof(hint));
-      hint.ai_family = AF_UNSPEC;
-      hint.ai_socktype = SOCK_STREAM;
-      hint.ai_protocol = IPPROTO_TCP;
-
-      int err;
-      if ((err = uv_getaddrinfo(g_loop, 
+    int err;
+    if ((err = uv_getaddrinfo(g_loop, 
             &((TCPSession *)sess)->upstream_addrinfo_req, 
             upstream_tcp_connect_domain, 
             (const char *)s5_ctx->dst_addr, 
             NULL, 
             &hint)) < 0) {
 
-        LOG_E("uv_getaddrinfo failed: %s, err: %s", 
-            s5_ctx->dst_addr, uv_strerror(err));
-        client_tcp_write_error(handle, err);
-        return;
-      }
-
-    } else if (s5_ctx->atyp == S5_ATYP_IPV6) {
-      struct sockaddr_in6 addr6;
-      addr6.sin6_family = AF_INET6;
-      addr6.sin6_port = htons(s5_ctx->dst_port);
-      memcpy(addr6.sin6_addr.s6_addr, s5_ctx->dst_addr, 16);
-
-      int err;
-      if ((err = upstream_tcp_connect(&((TCPSession *)sess)->upstream_connect_req, 
-              (IPAddr *)&addr6)) != 0) {
-        log_ipv6_and_port(s5_ctx->dst_addr, s5_ctx->dst_port, 
-            "upstream connect failed");
-        client_tcp_write_error((uv_stream_t *)sess->client_tcp, err); 
-      }
-
-    } else {
-      LOG_E("unknown ATYP: %d", s5_ctx->atyp);
-      client_tcp_write_error(handle, 20000);  // the error code is chosen at random
+      LOG_E("uv_getaddrinfo failed: %s, err: %s", 
+          s5_ctx->dst_addr, uv_strerror(err));
+      client_tcp_write_error(handle, err);
+      return;
     }
 
-  } else if (sess->state == S5_STREAMING) { 
-    ((uv_buf_t *)buf)->len = nread;
-    upstream_tcp_write_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp, buf);
+  } else if (s5_ctx->atyp == S5_ATYP_IPV6) {
+    struct sockaddr_in6 addr6;
+    addr6.sin6_family = AF_INET6;
+    addr6.sin6_port = htons(s5_ctx->dst_port);
+    memcpy(addr6.sin6_addr.s6_addr, s5_ctx->dst_addr, 16);
+
+    int err;
+    if ((err = upstream_tcp_connect(&((TCPSession *)sess)->upstream_connect_req, 
+            (IPAddr *)&addr6)) != 0) {
+      log_ipv6_and_port(s5_ctx->dst_addr, s5_ctx->dst_port, 
+          "upstream connect failed");
+      client_tcp_write_error((uv_stream_t *)sess->client_tcp, err); 
+    }
 
   } else {
-    // unreachable code
-    LOG_W("unepxected state: %d", sess->state);
-    close_session(sess);
+    LOG_E("unknown ATYP: %d", s5_ctx->atyp);
+    client_tcp_write_error(handle, 20000);  // the error code is chosen at random
   }
 }
 
@@ -632,7 +647,7 @@ void finish_socks5_udp_handshake(Session *sess) {
   init_client_udp_send_if_needed(udp_sess);
 
   // get the bound port and send it to the client, so the client
-  // can send us UDP datagrams on this port
+  // can send us UDP packets on this port
   if ((err = uv_udp_getsockname(udp_sess->client_udp_recv, &ipaddr.addr, 
           (int []){ sizeof(ipaddr) })) < 0) {
     LOG_W("uv_udp_getsockname failed: %s", uv_strerror(err));
@@ -722,17 +737,26 @@ void finish_socks5_handshake(Session *sess, IPAddr *ipaddr) {
 }
 
 void upstream_tcp_connect_log(Session *sess, int status) {
-    char ipstr[INET6_ADDRSTRLEN];
   if (sess->s5_ctx.atyp == S5_ATYP_IPV4) {
+    char ipstr[INET_ADDRSTRLEN];
     uv_inet_ntop(AF_INET, sess->s5_ctx.dst_addr, ipstr, INET_ADDRSTRLEN);
+    LOG_I("uv_tcp_connect: %s:%d, status: %s", 
+        ipstr, sess->s5_ctx.dst_port, 
+        status ? uv_strerror(status) : "CONNECTED");
 
   } else if (sess->s5_ctx.atyp == S5_ATYP_IPV6) {
+    char ipstr[INET6_ADDRSTRLEN];
     uv_inet_ntop(AF_INET6, sess->s5_ctx.dst_addr, ipstr, INET6_ADDRSTRLEN);
+    LOG_I("uv_tcp_connect: %s:%d, status: %s", 
+        ipstr, sess->s5_ctx.dst_port, 
+        status ? uv_strerror(status) : "CONNECTED");
+
+  } else {
+    LOG_I("uv_tcp_connect: %s:%d, status: %s", 
+        sess->s5_ctx.dst_addr, sess->s5_ctx.dst_port, 
+        status ? uv_strerror(status) : "CONNECTED");
   }
 
-  LOG_I("uv_tcp_connect: [%s]:%d, status: %s", 
-      ipstr, sess->s5_ctx.dst_port, 
-      status ? uv_strerror(status) : "CONNECTED");
 }
 
 int upstream_tcp_connect(uv_connect_t* req, IPAddr *ipaddr) {
@@ -849,10 +873,10 @@ int client_udp_recv_start(UDPSession *sess) {
     LOG_E("uv_udp_recv_start failed: %s", uv_strerror(err));
     return err;
   }
-  // if client_udp_send is bound, then we should start listen for datagrams 
-  // sent from the upstream_udp port to which we relayed the datagrams.
+  // if client_udp_send is bound, then we should start listening for UDP packets 
+  // sent from the upstream_udp port which we initially relayed the packets to.
   if (sess->client_udp_send != NULL) {
-    LOG_I("now will listen for UDP datagrams from remote");
+    LOG_I("now will listen for UDP packets from remote");
     err = uv_udp_recv_start(sess->upstream_udp, on_upstream_udp_alloc, 
         on_upstream_udp_recv_done);
     if (err < 0) {
@@ -896,9 +920,9 @@ void upstream_udp_send(uv_getaddrinfo_t* req, int status, struct addrinfo* res) 
   uv_freeaddrinfo(res);
 
   if (err == -1) {
-    // if we havn't successfully sent out the datagram, 
+    // if we havn't successfully sent out the packets, 
     // on_upstream_udp_send_done will not be called, so we have to call the 
-    // following here right here
+    // following function right here
     client_udp_recv_start(sess);
   }
 }
