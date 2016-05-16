@@ -969,7 +969,7 @@ void on_upstream_udp_recv_done(uv_udp_t* handle, ssize_t nread,
     data[0] = 0; // RSV
     data[1] = 0; // RSV
     data[2] = 0; // FRAG
-    data[3] = 1; // IPv4
+    data[3] = 4; // IPv6
     memcpy(&data[4], ((struct sockaddr_in6 *)addr)->sin6_addr.s6_addr, 16);
     data[20] = (unsigned char)(((struct sockaddr_in6 *)addr)->sin6_port >> 8);
     data[21] = (unsigned char)(((struct sockaddr_in6 *)addr)->sin6_port);
