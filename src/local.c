@@ -36,7 +36,8 @@ typedef struct ServerContext {
 } ServerContext;
 
 static void start_server(const char *host, int local_port, int backlog);
-static void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res);
+static void do_bind_and_listen(uv_getaddrinfo_t* req, int status, 
+    struct addrinfo* res);
 static void on_connection_new(uv_stream_t *server, int status);
 
 static int init_tcp_handle(Session *sess, uv_tcp_t **tcp_handle);
@@ -49,46 +50,51 @@ static void close_handle(uv_handle_t *handle);
 static void handle_close_cb(uv_handle_t *handle);
 static void finish_socks5_tcp_handshake(Session *sess);
 static void finish_socks5_udp_handshake(Session *sess);
-static void finish_socks5_handshake(Session *sess, IPAddr *ipaddr);
+static void finish_socks5_handshake(Session *sess, struct sockaddr_storage *addr);
 
 static int client_tcp_read_start(uv_stream_t *handle);
 static int client_tcp_write_start(uv_stream_t *handle, const uv_buf_t *buf);
-static int client_tcp_write_string(uv_stream_t *handle, const char *data, int len);
+static int client_tcp_write_string(uv_stream_t *handle, 
+    const char *data, int len);
 static int client_tcp_write_error(uv_stream_t *handle, int err);
-static void on_client_tcp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf);
-static void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf);
+static void on_client_tcp_alloc(uv_handle_t *handle, size_t size, 
+    uv_buf_t *buf);
+static void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread, 
+    const uv_buf_t *buf);
 static void on_client_tcp_write_done(uv_write_t *req, int status);
 static void handle_socks5_method_identification(uv_stream_t *handle, 
     ssize_t nread, const uv_buf_t *buf, Session *sess);
 static void handle_socks5_request(uv_stream_t *handle, 
     ssize_t nread, const uv_buf_t *buf, Session *sess);
 
-static void upstream_tcp_connect_domain(uv_getaddrinfo_t* req, int status, 
-    struct addrinfo* res);
-static int upstream_tcp_connect(uv_connect_t* req, IPAddr *ipaddr);
-static void upstream_tcp_connect_cb(uv_connect_t* req, int status);
+static void upstream_tcp_connect_domain(uv_getaddrinfo_t *req, int status, 
+    struct addrinfo *res);
+static int upstream_tcp_connect(uv_connect_t *req, struct sockaddr_storage *addr);
+static void upstream_tcp_connect_cb(uv_connect_t *req, int status);
 static void upstream_tcp_connect_log(Session *sess, int err);
 static int upstream_tcp_read_start(uv_stream_t *handle);
 static int upstream_tcp_write_start(uv_stream_t *handle, const uv_buf_t *buf);
-static void on_upstream_tcp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf);
+static void on_upstream_tcp_alloc(uv_handle_t *handle, size_t size, 
+    uv_buf_t *buf);
 static void on_upstream_tcp_read_done(uv_stream_t *handle, ssize_t nread, 
     const uv_buf_t *buf);
 static void on_upstream_tcp_write_done(uv_write_t *req, int status);
 
 static void on_client_udp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf);
-static void on_client_udp_recv_done(uv_udp_t* handle, ssize_t nread, 
-    const uv_buf_t* buf, const struct sockaddr* addr, unsigned flags);
-static void on_upstream_udp_send_done(uv_udp_send_t* req, int status);
-static void on_upstream_udp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf);
-static void on_upstream_udp_recv_done(uv_udp_t* handle, ssize_t nread, 
-    const uv_buf_t* buf, const struct sockaddr* addr, unsigned flags);
-static void on_client_udp_send_done(uv_udp_send_t* req, int status);
+static void on_client_udp_recv_done(uv_udp_t *handle, ssize_t nread, 
+    const uv_buf_t *buf, const struct sockaddr *addr, unsigned flags);
+static void on_upstream_udp_send_done(uv_udp_send_t *req, int status);
+static void on_upstream_udp_alloc(uv_handle_t *handle, size_t size, 
+    uv_buf_t *buf);
+static void on_upstream_udp_recv_done(uv_udp_t *handle, ssize_t nread, 
+    const uv_buf_t *buf, const struct sockaddr *addr, unsigned flags);
+static void on_client_udp_send_done(uv_udp_send_t *req, int status);
 static int client_udp_recv_start(UDPSession *sess);
-static void upstream_udp_send(uv_getaddrinfo_t* req, int status, 
-    struct addrinfo* res);
+static void upstream_udp_send(uv_getaddrinfo_t *req, int status, 
+    struct addrinfo *res);
 static void init_client_udp_send_if_needed(UDPSession *sess);
-static void client_udp_send_domain_resolved(uv_getaddrinfo_t* req, int status, 
-    struct addrinfo* res);
+static void client_udp_send_domain_resolved(uv_getaddrinfo_t *req, int status, 
+    struct addrinfo *res);
 
 int main(int argc, const char *argv[]) {
   start_server(SERVER_HOST, SERVER_PORT, SERVER_BACKLOG);
@@ -126,7 +132,8 @@ void start_server(const char *host, int local_port, int backlog) {
 
 void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res) {
   if (status < 0) {
-    LOG_E("getaddrinfo(\"%s\"): %s", g_server_ctx->server_cfg.host, uv_strerror(status));
+    LOG_E("getaddrinfo(\"%s\"): %s", g_server_ctx->server_cfg.host, 
+        uv_strerror(status));
     uv_freeaddrinfo(res);
     return;
   }
@@ -134,26 +141,29 @@ void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res)
   // abort if failing to init uv_tcp_t
   CHECK(uv_tcp_init(g_loop, &g_server_ctx->server_tcp) == 0);
 
-  IPAddr ipaddr;
+  struct sockaddr_storage addr;
   char ipstr[INET6_ADDRSTRLEN];
 
   for (struct addrinfo *ai = res; ai != NULL; ai = ai->ai_next) {
-    if (fill_ipaddr(&ipaddr, htons(g_server_ctx->server_cfg.local_port), 
+    if (fill_ipaddr(&addr, htons(g_server_ctx->server_cfg.local_port), 
           ipstr, sizeof(ipstr), ai) != 0) {
       continue;
     }
 
     if (ai->ai_family == AF_INET) {
       g_server_ctx->bound_ip_version = IPV4;
-      memcpy(g_server_ctx->bound_ip, &ipaddr.addr4.sin_addr.s_addr, 4);
+      memcpy(g_server_ctx->bound_ip, 
+          &((struct sockaddr_in *)&addr)->sin_addr.s_addr, 4);
 
     } else if (ai->ai_family == AF_INET6) {
       g_server_ctx->bound_ip_version = IPV6;
-      memcpy(g_server_ctx->bound_ip, ipaddr.addr6.sin6_addr.s6_addr, 16);
+      memcpy(g_server_ctx->bound_ip, 
+          ((struct sockaddr_in6 *)&addr)->sin6_addr.s6_addr, 16);
     }
 
     int err;
-    if ((err = uv_tcp_bind(&g_server_ctx->server_tcp, &ipaddr.addr, 0)) != 0) {
+    if ((err = uv_tcp_bind(&g_server_ctx->server_tcp, 
+            (struct sockaddr *)&addr, 0)) != 0) {
       LOG_W("uv_tcp_bind on %s:%d failed: %s", 
           ipstr, g_server_ctx->server_cfg.local_port, uv_strerror(err));
       continue;
@@ -345,7 +355,8 @@ void on_client_tcp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
   buf->len = sizeof(sess->client_buf);
 }
 
-void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf) {
+void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread, 
+    const uv_buf_t *buf) {
   if (nread == 0) { // EAGAIN || EWOULDBLOCK
     LOG_I("nread is 0, may reuse the connection");
     return;
@@ -459,7 +470,7 @@ void handle_socks5_request(uv_stream_t *handle, ssize_t nread,
 
     int err;
     if ((err = upstream_tcp_connect(&((TCPSession *)sess)->upstream_connect_req, 
-            (IPAddr *)&addr4)) != 0) {
+            (struct sockaddr_storage *)&addr4)) != 0) {
       log_ipv4_and_port(s5_ctx->dst_addr, s5_ctx->dst_port, 
           "upstream connect failed");
       client_tcp_write_error((uv_stream_t *)sess->client_tcp, err); 
@@ -494,7 +505,7 @@ void handle_socks5_request(uv_stream_t *handle, ssize_t nread,
 
     int err;
     if ((err = upstream_tcp_connect(&((TCPSession *)sess)->upstream_connect_req, 
-            (IPAddr *)&addr6)) != 0) {
+            (struct sockaddr_storage *)&addr6)) != 0) {
       log_ipv6_and_port(s5_ctx->dst_addr, s5_ctx->dst_port, 
           "upstream connect failed");
       client_tcp_write_error((uv_stream_t *)sess->client_tcp, err); 
@@ -523,7 +534,8 @@ void on_upstream_tcp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
   buf->len = sizeof(sess->upstream_buf);
 }
 
-void on_upstream_tcp_read_done(uv_stream_t *handle, ssize_t nread, const uv_buf_t *buf) {
+void on_upstream_tcp_read_done(uv_stream_t *handle, ssize_t nread, 
+    const uv_buf_t *buf) {
   if (nread == 0) { // EAGAIN || EWOULDBLOCK
     return;
   }
@@ -563,7 +575,8 @@ void on_upstream_tcp_write_done(uv_write_t *req, int status) {
   }
 }
 
-void upstream_tcp_connect_domain(uv_getaddrinfo_t* req, int status, struct addrinfo* res) {
+void upstream_tcp_connect_domain(uv_getaddrinfo_t* req, int status, 
+    struct addrinfo* res) {
   TCPSession *sess = container_of(req, TCPSession, upstream_addrinfo_req);
   if (status < 0) {
     LOG_E("getaddrinfo(\"%s\"): %s", sess->s5_ctx.dst_addr, uv_strerror(status));
@@ -573,15 +586,16 @@ void upstream_tcp_connect_domain(uv_getaddrinfo_t* req, int status, struct addri
   }
 
   char ipstr[INET6_ADDRSTRLEN];
-  IPAddr ipaddr;
+  struct sockaddr_storage addr;
 
   int err;
   for (struct addrinfo *ai = res; ai != NULL; ai = ai->ai_next) {
-    if (fill_ipaddr(&ipaddr, htons(sess->s5_ctx.dst_port), ipstr, sizeof(ipstr), ai) != 0) {
+    if (fill_ipaddr(&addr, htons(sess->s5_ctx.dst_port), ipstr, 
+          sizeof(ipstr), ai) != 0) {
       continue;
     }
 
-    if ((err = upstream_tcp_connect(&sess->upstream_connect_req, &ipaddr)) != 0) {
+    if ((err = upstream_tcp_connect(&sess->upstream_connect_req, &addr)) != 0) {
       LOG_W("upstream_tcp_connect failed on %s:%d, err: %s",
           ipstr, sess->s5_ctx.dst_port, uv_strerror(err));
       continue;
@@ -611,53 +625,58 @@ void upstream_tcp_connect_cb(uv_connect_t* req, int status) {
 }
 
 void finish_socks5_tcp_handshake(Session *sess) {
-  IPAddr ipaddr;
+  struct sockaddr_storage addr;
   int err;
 
-  if ((err = uv_tcp_getsockname(((TCPSession *)sess)->upstream_tcp, &ipaddr.addr, 
-          (int []){ sizeof(IPAddr) })) < 0) {
+  if ((err = uv_tcp_getsockname(((TCPSession *)sess)->upstream_tcp, 
+          (struct sockaddr *)&addr, (int []){ sizeof(struct sockaddr) })) < 0) {
     LOG_W("uv_tcp_getsockname failed: %s", uv_strerror(err));
     client_tcp_write_error((uv_stream_t *)sess->client_tcp, err);
     return;
   }
   sess->state = S5_STREAMING;
 
-  finish_socks5_handshake(sess, &ipaddr);
+  finish_socks5_handshake(sess, &addr);
 }
 
 void finish_socks5_udp_handshake(Session *sess) {
-  IPAddr ipaddr;
+  struct sockaddr_storage addr;
   int err;
 
   if (g_server_ctx->bound_ip_version == IPV4) {
-    ipaddr.addr4.sin_family = AF_INET;
-    memcpy(&ipaddr.addr4.sin_addr.s_addr, g_server_ctx->bound_ip, 4);
-    ipaddr.addr4.sin_port = 0;
+    struct sockaddr_in *addr4 = (struct sockaddr_in *)&addr;
+    addr4->sin_family = AF_INET;
+    memcpy(&addr4->sin_addr.s_addr, g_server_ctx->bound_ip, 4);
+    addr4->sin_port = 0;
   } else {
-    ipaddr.addr6.sin6_family = AF_INET6;
-    memcpy(ipaddr.addr6.sin6_addr.s6_addr, g_server_ctx->bound_ip, 16);
-    ipaddr.addr6.sin6_port = 0;
+    struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)&addr;
+    addr6->sin6_family = AF_INET6;
+    memcpy(((struct sockaddr_in6 *)&addr)->sin6_addr.s6_addr, 
+        g_server_ctx->bound_ip, 16);
+    addr6->sin6_port = 0;
   }
 
   UDPSession *udp_sess = (UDPSession *)sess;
   init_udp_handle(sess, &udp_sess->upstream_udp);
   init_udp_handle(sess, &udp_sess->client_udp_recv);
-  uv_udp_bind(udp_sess->client_udp_recv, &ipaddr.addr, UV_UDP_REUSEADDR);
+  uv_udp_bind(udp_sess->client_udp_recv, (struct sockaddr *)&addr, 
+      UV_UDP_REUSEADDR);
 
   init_client_udp_send_if_needed(udp_sess);
 
   // get the bound port and send it to the client, so the client
   // can send us UDP packets on this port
-  if ((err = uv_udp_getsockname(udp_sess->client_udp_recv, &ipaddr.addr, 
-          (int []){ sizeof(ipaddr) })) < 0) {
+  if ((err = uv_udp_getsockname(udp_sess->client_udp_recv, 
+          (struct sockaddr *)&addr, (int []){ sizeof(addr) })) < 0) {
     LOG_W("uv_udp_getsockname failed: %s", uv_strerror(err));
     client_tcp_write_error((uv_stream_t *)sess->client_tcp, err);
     return;
   }
 
-  uv_udp_recv_start(udp_sess->client_udp_recv, on_client_udp_alloc, on_client_udp_recv_done);
+  uv_udp_recv_start(udp_sess->client_udp_recv, on_client_udp_alloc, 
+      on_client_udp_recv_done);
 
-  finish_socks5_handshake(sess, &ipaddr);
+  finish_socks5_handshake(sess, &addr);
 }
 
 void init_client_udp_send_if_needed(UDPSession *sess) {
@@ -711,24 +730,24 @@ void init_client_udp_send_if_needed(UDPSession *sess) {
   init_udp_handle((Session *)sess, &sess->client_udp_send);
 }
 
-void finish_socks5_handshake(Session *sess, IPAddr *ipaddr) {
+void finish_socks5_handshake(Session *sess, struct sockaddr_storage *addr) {
   uv_buf_t buf = {
     .base = sess->client_buf
   };
   memcpy(buf.base, "\5\0\0\1", 4);
   uint16_t local_port = 0;
-  if (ipaddr->addr.sa_family == AF_INET) {
-    local_port = ipaddr->addr4.sin_port;
+  if (((struct sockaddr *)addr)->sa_family == AF_INET) {
+    local_port = ((struct sockaddr_in *)addr)->sin_port;
 
     buf.len = 10;
-    memcpy(buf.base+4, &ipaddr->addr4.sin_addr.s_addr, 4);
+    memcpy(buf.base+4, &((struct sockaddr_in *)addr)->sin_addr.s_addr, 4);
     memcpy(buf.base+8, &local_port, 2);
 
   } else {  // IPV6
-    local_port = ipaddr->addr6.sin6_port;
+    local_port = ((struct sockaddr_in6 *)addr)->sin6_port;
 
     buf.len = 22;
-    memcpy(buf.base+4, &ipaddr->addr6.sin6_addr.s6_addr, 16);
+    memcpy(buf.base+4, ((struct sockaddr_in6 *)addr)->sin6_addr.s6_addr, 16);
     memcpy(buf.base+20, &local_port, 2);
   }
 
@@ -759,11 +778,11 @@ void upstream_tcp_connect_log(Session *sess, int status) {
 
 }
 
-int upstream_tcp_connect(uv_connect_t* req, IPAddr *ipaddr) {
+int upstream_tcp_connect(uv_connect_t *req, struct sockaddr_storage *addr) {
   TCPSession *sess = container_of(req, TCPSession, upstream_connect_req);
 
   int err;
-  if ((err = uv_tcp_connect(req, sess->upstream_tcp, &ipaddr->addr, 
+  if ((err = uv_tcp_connect(req, sess->upstream_tcp, (struct sockaddr *)addr, 
           upstream_tcp_connect_cb)) != 0) {
     LOG_W("uv_tcp_connect failed: %s", uv_strerror(err));
   }
@@ -776,7 +795,7 @@ void on_client_udp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
   buf->len = sizeof(sess->clinet_udp_recv_buf);
 }
 
-void on_client_udp_recv_done(uv_udp_t* handle, ssize_t nread, 
+void on_client_udp_recv_done(uv_udp_t *handle, ssize_t nread, 
     const uv_buf_t* buf, const struct sockaddr* addr, unsigned flags) {
   if (nread < 0) {
     LOG_V("received udp packet failed: %s", uv_strerror(nread));
@@ -896,16 +915,17 @@ void upstream_udp_send(uv_getaddrinfo_t* req, int status, struct addrinfo* res) 
   }
 
   char ipstr[INET6_ADDRSTRLEN];
-  IPAddr ipaddr;
+  struct sockaddr_storage addr;
 
   int err = -1;
   for (struct addrinfo *ai = res; ai != NULL; ai = ai->ai_next) {
-    if (fill_ipaddr(&ipaddr, htons(sess->s5_ctx.dst_port), ipstr, sizeof(ipstr), ai) != 0) {
+    if (fill_ipaddr(&addr, htons(sess->s5_ctx.dst_port), ipstr, 
+          sizeof(ipstr), ai) != 0) {
       continue;
     }
 
     err = uv_udp_send(&sess->upstream_udp_send_req, sess->upstream_udp, 
-        (uv_buf_t *)req->data, 1, (struct sockaddr *)&ipaddr.addr,
+        (uv_buf_t *)req->data, 1, (struct sockaddr *)&addr,
         on_upstream_udp_send_done);
 
     if (err < 0) {
@@ -934,8 +954,8 @@ void on_upstream_udp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
   buf->len = sizeof(sess->upstream_udp_buf) - 22; 
 }
 
-void on_upstream_udp_recv_done(uv_udp_t* handle, ssize_t nread, 
-    const uv_buf_t* buf, const struct sockaddr* addr, unsigned flags) {
+void on_upstream_udp_recv_done(uv_udp_t *handle, ssize_t nread, 
+    const uv_buf_t *buf, const struct sockaddr *addr, unsigned flags) {
   if (nread < 0) {
     LOG_V("received udp packet failed: %s", uv_strerror(nread));
     return;
@@ -980,17 +1000,19 @@ void on_upstream_udp_recv_done(uv_udp_t* handle, ssize_t nread,
   }
 
   Socks5Ctx *s5_ctx = &sess->s5_ctx;
-  IPAddr ipaddr;
+  struct sockaddr_storage c_addr;
 
   if (s5_ctx->atyp == S5_ATYP_IPV4) {
-    copy_ipv4_addr(&ipaddr.addr4.sin_addr.s_addr, (char *)s5_ctx->dst_addr);
-    ipaddr.addr4.sin_family = AF_INET;
-    ipaddr.addr4.sin_port = s5_ctx->dst_port;;
+    struct sockaddr_in *addr4 = (struct sockaddr_in *)&c_addr;
+    copy_ipv4_addr(&addr4->sin_addr.s_addr, (char *)s5_ctx->dst_addr);
+    addr4->sin_family = AF_INET;
+    addr4->sin_port = s5_ctx->dst_port;;
 
   } else if (s5_ctx->atyp == S5_ATYP_IPV6) {
-    memcpy(ipaddr.addr6.sin6_addr.s6_addr, s5_ctx->dst_addr, 16);
-    ipaddr.addr6.sin6_family = AF_INET6;
-    ipaddr.addr6.sin6_port = s5_ctx->dst_port;;
+    struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)&c_addr;
+    memcpy(addr6->sin6_addr.s6_addr, s5_ctx->dst_addr, 16);
+    addr6->sin6_family = AF_INET6;
+    addr6->sin6_port = s5_ctx->dst_port;;
 
   } else {
     // unreachable code
@@ -999,7 +1021,7 @@ void on_upstream_udp_recv_done(uv_udp_t* handle, ssize_t nread,
   }
 
   int err = uv_udp_send(&sess->client_udp_send_req, sess->client_udp_send, 
-      buf, 1, (struct sockaddr *)&ipaddr.addr,
+      buf, 1, (struct sockaddr *)&c_addr,
       on_client_udp_send_done);
 
   if (err < 0) {
