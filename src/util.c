@@ -14,7 +14,7 @@ void log_ipv6_and_port(void *ipv6, int port, const char *msg) {
   LOG_V("%s: [%s]:%d", msg, data, port);
 }
 
-int fill_ipaddr(struct sockaddr_storage *addr, int port,  char *ipstr, 
+int fill_ipaddr(struct sockaddr *addr, int port,  char *ipstr, 
     int ipstr_len, struct addrinfo *ai) {
   if (ai->ai_family == AF_INET) {
     struct sockaddr_in *addr4 = (struct sockaddr_in *)addr;
