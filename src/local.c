@@ -5,11 +5,16 @@
 #include "alloc.h"
 #include "socks5.h"
 #include "defs.h"
+#include "encrypt.h"
 
 #define SERVER_HOST "127.0.0.1"
 #define SERVER_PORT 8789
 #define SERVER_BACKLOG 256
 #define KEEPALIVE 60
+
+#define REMOTE_SERVER_HOST "127.0.0.1"
+#define REMOTE_SERVER_PORT 8790
+#define REMOTE_SERVER_PASSWD "testpasswd"
 
 struct ServerContext;
 static struct ServerContext *g_server_ctx;
@@ -21,6 +26,13 @@ typedef struct {
   int backlog;
 } ServerCfg;
 
+typedef struct {
+  int ai_family;   
+  struct sockaddr_storage addr;
+  const char *cipher_name;
+  const char *passwd;
+} RemoteServerCfg;
+
 typedef enum {
   IPV4,
   IPV6
@@ -30,6 +42,7 @@ typedef struct ServerContext {
   uv_getaddrinfo_t addrinfo_req;
   uv_tcp_t server_tcp;
   ServerCfg server_cfg;
+  RemoteServerCfg rs_cfg;
 
   IPVersion bound_ip_version;
   uint8_t bound_ip[16];
@@ -111,6 +124,12 @@ void start_server(const char *host, int local_port, int backlog) {
   server_ctx.server_cfg.host = host;
   server_ctx.server_cfg.local_port = local_port;
   server_ctx.server_cfg.backlog = backlog;
+
+  // hardcode the server and port for testing 
+  server_ctx.rs_cfg.ai_family = AF_INET;
+  uv_ip4_addr(REMOTE_SERVER_HOST, REMOTE_SERVER_PORT, 
+      (struct sockaddr_in *)&server_ctx.rs_cfg.addr);
+  server_ctx.rs_cfg.passwd = REMOTE_SERVER_PASSWD;
 
   struct addrinfo hint;
   memset(&hint, 0, sizeof(hint));
@@ -231,18 +250,23 @@ void close_session(Session *sess) {
   LOG_V("now will close session");
   if (sess->type == SESSION_TYPE_TCP) {
     TCPSession *tcp_sess = (TCPSession *)sess;
+    tcp_sess->upstream_tcp->data = NULL;
     close_handle((uv_handle_t *)tcp_sess->upstream_tcp);
 
   } else if (sess->type == SESSION_TYPE_UDP) {
     UDPSession *udp_sess = (UDPSession *)sess;
-    close_handle((uv_handle_t *)udp_sess->client_udp_recv);
+    udp_sess->upstream_udp->data = NULL;
+    udp_sess->client_udp_send->data = NULL;
+    udp_sess->client_udp_recv->data = NULL;
     close_handle((uv_handle_t *)udp_sess->upstream_udp);
     close_handle((uv_handle_t *)udp_sess->client_udp_recv);
     close_handle((uv_handle_t *)udp_sess->client_udp_send);
   }
 
+  sess->client_tcp->data = NULL;
   close_handle((uv_handle_t *)sess->client_tcp);
 
+  free(sess->socks5_req_data);
   free(sess);
 }
 
@@ -302,6 +326,9 @@ int client_tcp_read_start(uv_stream_t *handle) {
 
 int client_tcp_write_error(uv_stream_t *handle, int err) {
   Session *sess = (Session *)handle->data;
+  if (sess == NULL) {
+    return -1;
+  }
 
   char buf[] = { 5, 1, 0, 1, 0, 0, 0, 0, 0, 0 };
   sess->state = S5_SESSION_END; // cause the session be closed in on_write_done_cb
@@ -327,6 +354,10 @@ int client_tcp_write_string(uv_stream_t *handle, const char *data, int len) {
 
 int client_tcp_write_start(uv_stream_t *handle, const uv_buf_t *buf) {
   Session *sess = (Session *)handle->data;
+  if (sess == NULL) {
+    return -1;
+  }
+
   int err;
   if ((err = uv_write(&sess->client_write_req, 
           (uv_stream_t *)handle, buf, 1, on_client_tcp_write_done)) != 0) {
@@ -366,6 +397,9 @@ void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread,
   uv_read_stop(handle);
 
   Session *sess = (Session *)handle->data;
+  if (sess == NULL) {
+    return;
+  }
   if (nread < 0) {
     LOG_I("client read done: %s", uv_strerror(nread));
     close_session(sess);
@@ -378,14 +412,28 @@ void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread,
   } else if (sess->state == S5_REQUEST) {
     handle_socks5_request(handle, nread, buf, sess);
 
-  } else if (sess->state == S5_STREAMING) { 
-    ((uv_buf_t *)buf)->len = nread;
-    upstream_tcp_write_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp, buf);
-
   } else {
-    // unreachable code
-    LOG_W("unepxected state: %d", sess->state);
-    close_session(sess);
+    if (sess->state == S5_START_PROXY) {
+      uv_buf_t req_data_buf;
+      req_data_buf.base = sess->socks5_req_data;
+      req_data_buf.len = sess->socks5_req_data_len;
+      upstream_tcp_write_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp, 
+          &req_data_buf);
+
+      // after sending the first encrypted packet to remote, we enter streaming mode
+      sess->state = S5_STREAMING;
+    }
+
+    if (sess->state == S5_STREAMING) { 
+      ((uv_buf_t *)buf)->len = nread;
+      upstream_tcp_write_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp, 
+          buf);
+
+    } else {
+      // unreachable code
+      LOG_W("unepxected state: %d", sess->state);
+      close_session(sess);
+    }
   }
 }
 
@@ -462,6 +510,28 @@ void handle_socks5_request(uv_stream_t *handle, ssize_t nread,
     return;
   }
 
+  // REMOTE connect
+  if (1) {
+    cipher_ctx_init(&sess->e_ctx, g_server_ctx->rs_cfg.cipher_name, 
+        g_server_ctx->rs_cfg.passwd);
+    cipher_ctx_init(&sess->d_ctx, g_server_ctx->rs_cfg.cipher_name, 
+        g_server_ctx->rs_cfg.passwd);
+
+    // leave out the first 3 bytes(VER, CMD, RSV) of the socks5 request
+    sess->socks5_req_data_len = nread - 3;
+    sess->socks5_req_data = encrypt(&sess->e_ctx, buf->base + 3, nread - 3, 
+        &sess->socks5_req_data_len);
+
+    int err = upstream_tcp_connect(&((TCPSession *)sess)->upstream_connect_req, 
+        (struct sockaddr *)&g_server_ctx->rs_cfg.addr);
+    if (err != 0) {
+      LOG_E("connecting to remote server failed: %s", uv_strerror(err));
+      client_tcp_write_error((uv_stream_t *)sess->client_tcp, err); 
+    }
+
+    return;
+  }
+
   if (s5_ctx->atyp == S5_ATYP_IPV4) {
     struct sockaddr_in addr4;
     addr4.sin_family = AF_INET;
@@ -519,6 +589,9 @@ void handle_socks5_request(uv_stream_t *handle, ssize_t nread,
 
 int upstream_tcp_read_start(uv_stream_t *handle) {
   Session *sess = (Session *)handle->data;
+  if (sess == NULL) {
+    return -1;
+  }
   int err;
   if ((err = uv_read_start(handle, on_upstream_tcp_alloc, 
           on_upstream_tcp_read_done)) != 0) {
@@ -544,6 +617,9 @@ void on_upstream_tcp_read_done(uv_stream_t *handle, ssize_t nread,
   uv_read_stop(handle);
 
   Session *sess = (Session *)handle->data;
+  if (sess == NULL) {
+    return;
+  }
   if (nread < 0 || sess->state == S5_SESSION_END) {
     LOG_V("upstream read failed: %s", uv_strerror(nread));
     close_session(sess);
@@ -556,6 +632,9 @@ void on_upstream_tcp_read_done(uv_stream_t *handle, ssize_t nread,
 
 int upstream_tcp_write_start(uv_stream_t *handle, const uv_buf_t *buf) {
   TCPSession *sess = (TCPSession *)handle->data;
+  if (sess == NULL) {
+    return -1;
+  }
   int err;
   if ((err = uv_write(&sess->upstream_write_req, (uv_stream_t *)handle, 
           buf, 1, on_upstream_tcp_write_done)) != 0) {
@@ -595,6 +674,9 @@ void upstream_tcp_connect_domain(uv_getaddrinfo_t* req, int status,
       continue;
     }
 
+    
+    int close_session_on_failed = ai->ai_next == NULL;
+    sess->upstream_connect_req.data = (void *)(intptr_t)close_session_on_failed;
     if ((err = upstream_tcp_connect(&sess->upstream_connect_req, 
             (struct sockaddr *)&addr)) != 0) {
       LOG_W("upstream_tcp_connect failed on %s:%d, err: %s",
@@ -614,10 +696,14 @@ void upstream_tcp_connect_domain(uv_getaddrinfo_t* req, int status,
 
 void upstream_tcp_connect_cb(uv_connect_t* req, int status) {
   TCPSession *sess = container_of(req, TCPSession, upstream_connect_req);
+  if (sess == NULL) {
+    return;
+  }
 
   upstream_tcp_connect_log((Session *)sess, status);
   if (status < 0) {
-    if ((intptr_t)req->data) {
+    int close_session_on_failed = (intptr_t)req->data;
+    if (close_session_on_failed) {
       client_tcp_write_error((uv_stream_t *)sess->client_tcp, status); 
     }
   } else {
@@ -635,7 +721,11 @@ void finish_socks5_tcp_handshake(Session *sess) {
     client_tcp_write_error((uv_stream_t *)sess->client_tcp, err);
     return;
   }
-  sess->state = S5_STREAMING;
+  if (sess->socks5_req_data != NULL) {
+    sess->state = S5_START_PROXY;
+  } else {
+    sess->state = S5_STREAMING;
+  }
 
   finish_socks5_handshake(sess, (struct sockaddr *)&addr);
 }
@@ -737,7 +827,7 @@ void finish_socks5_handshake(Session *sess, struct sockaddr *addr) {
   };
   memcpy(buf.base, "\5\0\0\1", 4);
   uint16_t local_port = 0;
-  if (((struct sockaddr *)addr)->sa_family == AF_INET) {
+  if (addr->sa_family == AF_INET) {
     local_port = ((struct sockaddr_in *)addr)->sin_port;
 
     buf.len = 10;
@@ -809,6 +899,9 @@ void on_client_udp_recv_done(uv_udp_t *handle, ssize_t nread,
 
   LOG_V("received udp packet: %lu", nread);
   UDPSession *sess = (UDPSession *)handle->data;
+  if (sess == NULL) {
+    return;
+  }
   int err;
   if ((err = socks5_parse_udp_request(&sess->s5_ctx, buf->base, buf->len)) != S5_OK) {
       LOG_E("socks5_parse_udp_request failed, ignored the dgram, err: %d", err);
@@ -971,6 +1064,9 @@ void on_upstream_udp_recv_done(uv_udp_t *handle, ssize_t nread,
   uv_udp_recv_stop(handle);
 
   UDPSession *sess = (UDPSession *)handle->data;
+  if (sess == NULL) {
+    return;
+  }
 
   if (addr->sa_family == AF_INET) {
     ((uv_buf_t *)buf)->base -= 10;

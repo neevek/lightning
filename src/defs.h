@@ -1,6 +1,7 @@
 #ifndef DEFS_H_
 #define DEFS_H_
 #include <uv.h>
+#include "encrypt.h"
 
 #define SESSION_TCP_BUFSIZ 2048
 #define SESSION_UDP_BUFSIZ 4096
@@ -10,6 +11,7 @@ struct Socks5Ctx;
 typedef enum {
   S5_METHOD_IDENTIFICATION,
   S5_REQUEST,
+  S5_START_PROXY,
   S5_STREAMING,
   S5_SESSION_END,
 } SessionState;
@@ -20,13 +22,18 @@ typedef enum {
   SESSION_TYPE_UDP
 } SessionType;
 
+ // 'socks5_req_data' is NULL if it is a DIRECT connection(no proxy)
 #define SESSION_FIELDS \
   uv_tcp_t *client_tcp; \
   uv_write_t client_write_req; \
   char client_buf[SESSION_TCP_BUFSIZ]; \
   SessionState state; \
   Socks5Ctx s5_ctx; \
-  SessionType type;
+  CipherCtx e_ctx; \
+  CipherCtx d_ctx; \
+  char *socks5_req_data;  \
+  int socks5_req_data_len; \
+  SessionType type; 
 
 typedef struct {
   SESSION_FIELDS
