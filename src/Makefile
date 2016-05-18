@@ -1,8 +1,8 @@
 CC=gcc
 CFLAGS=-c -Wall -O0 -g -DLOG_VERBOSE
-LDFLAGS=-luv
+LDFLAGS=-luv -lcrypto -lssl
 
-SRCS=alloc.c local.c socks5.c util.c
+SRCS=alloc.c local.c socks5.c util.c encrypt.c
 OBJS=$(SRCS:.c=.o)
 EXECUTABLE=ligtning
 

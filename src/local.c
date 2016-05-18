@@ -383,13 +383,17 @@ void on_client_tcp_write_done(uv_write_t *req, int status) {
 void on_client_tcp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
   Session *sess = (Session *)handle->data;
   buf->base = sess->client_buf;
-  buf->len = sizeof(sess->client_buf);
+  // reserve some space for encrypted version of the data
+  buf->len = sizeof(sess->client_buf) - IV_LEN_AND_BLOCK_LEN;
+}
+
+int is_proxy_connect(Session *sess) {
+  return sess->socks5_req_data_len > 0;
 }
 
 void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread, 
     const uv_buf_t *buf) {
   if (nread == 0) { // EAGAIN || EWOULDBLOCK
-    LOG_I("nread is 0, may reuse the connection");
     return;
   }
 
@@ -425,6 +429,14 @@ void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread,
     }
 
     if (sess->state == S5_STREAMING) { 
+      if (is_proxy_connect(sess)) {
+        if (!encrypt(&sess->e_ctx, buf->base, (int *)&nread, 1)) {
+          LOG_E("passwd incorrect");
+          close_session(sess);
+          return;
+        }
+      } 
+
       ((uv_buf_t *)buf)->len = nread;
       upstream_tcp_write_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp, 
           buf);
@@ -517,10 +529,9 @@ void handle_socks5_request(uv_stream_t *handle, ssize_t nread,
     cipher_ctx_init(&sess->d_ctx, g_server_ctx->rs_cfg.cipher_name, 
         g_server_ctx->rs_cfg.passwd);
 
-    // leave out the first 3 bytes(VER, CMD, RSV) of the socks5 request
-    sess->socks5_req_data_len = nread - 3;
-    sess->socks5_req_data = encrypt(&sess->e_ctx, buf->base + 3, nread - 3, 
-        &sess->socks5_req_data_len);
+    sess->socks5_req_data_len = nread;
+    sess->socks5_req_data = encrypt(&sess->e_ctx, buf->base, 
+        &sess->socks5_req_data_len, 0);
 
     int err = upstream_tcp_connect(&((TCPSession *)sess)->upstream_connect_req, 
         (struct sockaddr *)&g_server_ctx->rs_cfg.addr);
@@ -624,6 +635,14 @@ void on_upstream_tcp_read_done(uv_stream_t *handle, ssize_t nread,
     LOG_V("upstream read failed: %s", uv_strerror(nread));
     close_session(sess);
     return;
+  }
+
+  if (is_proxy_connect(sess)) {
+    if (!decrypt(&sess->e_ctx, buf->base, (int *)&nread, 1)) {
+      LOG_E("passwd is incorrect");
+      close_session(sess);
+      return;
+    }
   }
 
   ((uv_buf_t *)buf)->len = nread;
@@ -883,7 +902,8 @@ int upstream_tcp_connect(uv_connect_t *req, struct sockaddr *addr) {
 void on_client_udp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
   UDPSession *sess = (UDPSession *)handle->data;
   buf->base = sess->clinet_udp_recv_buf;
-  buf->len = sizeof(sess->clinet_udp_recv_buf);
+  // reserve some space for encrypted version of the data
+  buf->len = sizeof(sess->clinet_udp_recv_buf) - IV_LEN_AND_BLOCK_LEN;
 }
 
 void on_client_udp_recv_done(uv_udp_t *handle, ssize_t nread, 

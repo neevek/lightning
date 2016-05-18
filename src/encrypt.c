@@ -26,7 +26,7 @@ int cipher_ctx_init(CipherCtx *ctx, const char *cipher_name,
   ctx->key_len = EVP_CIPHER_key_length(cipher);
   ctx->key = lmalloc(ctx->key_len);
   if (!EVP_BytesToKey(cipher, EVP_md5(), NULL, 
-        (const unsigned char *)ctx->key, ctx->key_len, 1, ctx->key, NULL)) {
+        (const unsigned char *)passwd, strlen(passwd), 1, ctx->key, NULL)) {
     LOG_E("EVP_BytesToKey failed");
     free(ctx->key);
     return -1;
@@ -38,10 +38,11 @@ int cipher_ctx_init(CipherCtx *ctx, const char *cipher_name,
   return 0;
 }
 
-char *encrypt(CipherCtx *ctx, char *buf, int len, int *cbuf_len) {
+char *encrypt(CipherCtx *ctx, char *buf, INOUT int *len, int inplace) {
   assert(ctx && buf);
 
-  *cbuf_len = 0;
+  int ilen = *len;
+  int olen = 0;
   unsigned char *cipher_buf = NULL;
   if (ctx->iv_len == -1) {
     ctx->iv_len = EVP_CIPHER_iv_length(ctx->cipher);
@@ -50,9 +51,9 @@ char *encrypt(CipherCtx *ctx, char *buf, int len, int *cbuf_len) {
       ctx->iv = lmalloc(ctx->iv_len);
       RAND_bytes(ctx->iv, ctx->iv_len);
 
-      cipher_buf = lmalloc(len + ctx->iv_len);
+      cipher_buf = lmalloc(ilen + ctx->iv_len);
       memcpy(cipher_buf, ctx->iv, ctx->iv_len);
-      *cbuf_len += ctx->iv_len;
+      olen += ctx->iv_len;
     }
   }
 
@@ -62,39 +63,48 @@ char *encrypt(CipherCtx *ctx, char *buf, int len, int *cbuf_len) {
   EVP_CipherInit_ex(ctx->evp_cipher_ctx, NULL, NULL, ctx->key, ctx->iv, 1);
 
   if (cipher_buf) {
-    cipher_buf = lrealloc(cipher_buf, len + ctx->iv_len + 
+    cipher_buf = lrealloc(cipher_buf, ilen + ctx->iv_len + 
         EVP_CIPHER_CTX_block_size(ctx->evp_cipher_ctx));
   } else {
-    cipher_buf = lmalloc(len + EVP_CIPHER_CTX_block_size(ctx->evp_cipher_ctx));
+    cipher_buf = lmalloc(ilen + EVP_CIPHER_CTX_block_size(ctx->evp_cipher_ctx));
   }
 
   int out = 0;
-  if (!EVP_CipherUpdate(ctx->evp_cipher_ctx, cipher_buf + *cbuf_len, &out, 
-        (unsigned char *)buf, len)) {
+  if (!EVP_CipherUpdate(ctx->evp_cipher_ctx, cipher_buf + olen, &out, 
+        (unsigned char *)buf, ilen)) {
     LOG_E("EVP_CipherUpdate failed");
     free(cipher_buf);
     return NULL;
   }
-  *cbuf_len += out;
+  olen += out;
 
   out = 0;
-  if (!EVP_CipherFinal_ex(ctx->evp_cipher_ctx, cipher_buf + *cbuf_len, &out)) {
+  if (!EVP_CipherFinal_ex(ctx->evp_cipher_ctx, cipher_buf + olen, &out)) {
     LOG_E("EVP_CipherFinal_ex failed");
     free(cipher_buf);
     return NULL;
   }
-  *cbuf_len += out;
+  olen += out;
 
+  if (inplace) {
+    // assumes buf is big enough to store the encrypted data
+    memcpy(buf, cipher_buf, olen);
+    free(cipher_buf);
+    cipher_buf = (unsigned char *)buf;
+  }
+  *len = olen;
   return (char *)cipher_buf;
 }
 
-char *decrypt(CipherCtx *ctx, char *buf, int len, int *dbuf_len) {
+char *decrypt(CipherCtx *ctx, char *buf, INOUT int *len, int inplace) {
   assert(ctx && buf);
 
+  int ilen = *len;
+  int olen = 0;
   if (ctx->iv_len == -1) {
     ctx->iv_len = EVP_CIPHER_iv_length(ctx->cipher);
     printf("dec iv_len: %d\n", ctx->iv_len);
-    if (len < ctx->iv_len) {
+    if (ilen < ctx->iv_len) {
       LOG_E("length of IV is too small");
       return NULL;
     }
@@ -103,7 +113,7 @@ char *decrypt(CipherCtx *ctx, char *buf, int len, int *dbuf_len) {
       ctx->iv = lmalloc(ctx->iv_len);
       memcpy(ctx->iv, buf, ctx->iv_len);
       buf += ctx->iv_len;
-      len -= ctx->iv_len;
+      ilen -= ctx->iv_len;
     }
   }
 
@@ -112,26 +122,32 @@ char *decrypt(CipherCtx *ctx, char *buf, int len, int *dbuf_len) {
   EVP_CIPHER_CTX_set_key_length(ctx->evp_cipher_ctx, ctx->key_len);
   EVP_CipherInit_ex(ctx->evp_cipher_ctx, NULL, NULL, ctx->key, ctx->iv, 0);
 
-  *dbuf_len = 0;
   unsigned char *decipher_buf = 
-    lmalloc(len + EVP_CIPHER_CTX_block_size(ctx->evp_cipher_ctx));
+    lmalloc(ilen + EVP_CIPHER_CTX_block_size(ctx->evp_cipher_ctx));
 
   int out = 0;
   if (!EVP_CipherUpdate(ctx->evp_cipher_ctx, decipher_buf, &out, 
-        (unsigned char *)buf, len)) {
+        (unsigned char *)buf, ilen)) {
     LOG_E("EVP_CipherUpdate failed");
     free(decipher_buf);
     return NULL;
   }
-  *dbuf_len += out;
+  olen += out;
 
   out = 0;
-  if (!EVP_CipherFinal_ex(ctx->evp_cipher_ctx, decipher_buf + *dbuf_len, &out)) {
+  if (!EVP_CipherFinal_ex(ctx->evp_cipher_ctx, decipher_buf + olen, &out)) {
     LOG_E("EVP_CipherFinal_ex failed");
     free(decipher_buf);
     return NULL;
   }
-  *dbuf_len += out;
+  olen += out;
+
+  if (inplace) {
+    memcpy(buf, decipher_buf, olen);
+    free(decipher_buf);
+    decipher_buf = (unsigned char *)buf;
+  }
+  *len = olen;
 
   return (char *)decipher_buf;
 }
@@ -147,6 +163,7 @@ void cipher_ctx_destroy(CipherCtx *ctx) {
   free((void *)ctx->iv);
 }
 
+#ifdef DEBUG_ENCRYPT
 
 int main(int argc, const char *argv[]) {
   cipher_global_init();
@@ -168,28 +185,37 @@ int main(int argc, const char *argv[]) {
   char buf2[] = "somethign new";
   char buf3[] = "Hey OpenSSL";
 
-  int out_len = 0;
-  char *cipher_buf = encrypt(&ctx_e, buf, sizeof(buf), &out_len);
-  printf("orig: %d\n", out_len);
-  char *orig_buf= decrypt(&ctx_d, cipher_buf, out_len, &out_len);
-  printf("declen: %d\n", out_len);
+  int len = sizeof(buf);
+  char *cipher_buf = encrypt(&ctx_e, buf, &len, 0);
+  printf("orig: %d\n", len);
+  char *orig_buf= decrypt(&ctx_d, cipher_buf, &len, 0);
+  printf("declen: %d\n", len);
   printf("dec: %s\n", orig_buf);
 
-  out_len = 0;
-  cipher_buf = encrypt(&ctx_e, buf2, sizeof(buf2), &out_len);
-  printf("orig: %d\n", out_len);
-  orig_buf= decrypt(&ctx_d, cipher_buf, out_len, &out_len);
-  printf("declen: %d\n", out_len);
+  len = sizeof(buf2);
+  cipher_buf = encrypt(&ctx_e, buf2, &len, 0);
+  printf("orig: %d\n", len);
+  orig_buf= decrypt(&ctx_d, cipher_buf, &len, 0);
+  printf("declen: %d\n", len);
   printf("dec: %s\n", orig_buf);
 
-  out_len = 0;
-  cipher_buf = encrypt(&ctx_e, buf3, sizeof(buf3), &out_len);
-  printf("orig: %d\n", out_len);
-  orig_buf= decrypt(&ctx_d, cipher_buf, out_len, &out_len);
-  printf("declen: %d\n", out_len);
+  len = sizeof(buf3);
+  cipher_buf = encrypt(&ctx_e, buf3, &len, 0);
+  printf("orig: %d\n", len);
+  orig_buf= decrypt(&ctx_d, cipher_buf, &len, 0);
+  printf("declen: %d\n", len);
   printf("dec: %s\n", orig_buf);
+
+  char *str = strdup("this is a long string!!!");
+  int slen = strlen(str) + 1;  // including terminating null
+  str = encrypt(&ctx_e, str, &slen, 1);
+  str = decrypt(&ctx_e, str, &slen, 1);
+  printf("dec: %s\n", str);
+  free(str);
 
   cipher_ctx_destroy(&ctx_e);
   cipher_ctx_destroy(&ctx_d);
   return 0;
 }
+
+#endif

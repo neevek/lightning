@@ -26,7 +26,7 @@ typedef enum {
 #define SESSION_FIELDS \
   uv_tcp_t *client_tcp; \
   uv_write_t client_write_req; \
-  char client_buf[SESSION_TCP_BUFSIZ]; \
+  char client_buf[SESSION_TCP_BUFSIZ + IV_LEN_AND_BLOCK_LEN]; \
   SessionState state; \
   Socks5Ctx s5_ctx; \
   CipherCtx e_ctx; \
@@ -53,7 +53,7 @@ typedef struct {
   SESSION_FIELDS
 
   uv_udp_t *client_udp_recv;
-  char clinet_udp_recv_buf[SESSION_UDP_BUFSIZ]; 
+  char clinet_udp_recv_buf[SESSION_UDP_BUFSIZ + IV_LEN_AND_BLOCK_LEN]; 
 
   uv_udp_t *upstream_udp;
   uv_udp_send_t upstream_udp_send_req;
