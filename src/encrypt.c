@@ -47,7 +47,6 @@ char *encrypt(CipherCtx *ctx, char *buf, INOUT int *len, int inplace) {
   if (ctx->iv_len == -1) {
     ctx->iv_len = EVP_CIPHER_iv_length(ctx->cipher);
     if (ctx->iv_len > 0) {
-      printf("enc iv_len: %d\n", ctx->iv_len);
       ctx->iv = lmalloc(ctx->iv_len);
       RAND_bytes(ctx->iv, ctx->iv_len);
 
@@ -99,11 +98,11 @@ char *encrypt(CipherCtx *ctx, char *buf, INOUT int *len, int inplace) {
 char *decrypt(CipherCtx *ctx, char *buf, INOUT int *len, int inplace) {
   assert(ctx && buf);
 
+  char *input_buf = buf;
   int ilen = *len;
   int olen = 0;
   if (ctx->iv_len == -1) {
     ctx->iv_len = EVP_CIPHER_iv_length(ctx->cipher);
-    printf("dec iv_len: %d\n", ctx->iv_len);
     if (ilen < ctx->iv_len) {
       LOG_E("length of IV is too small");
       return NULL;
@@ -143,7 +142,7 @@ char *decrypt(CipherCtx *ctx, char *buf, INOUT int *len, int inplace) {
   olen += out;
 
   if (inplace) {
-    memcpy(buf, decipher_buf, olen);
+    memcpy(input_buf, decipher_buf, olen);
     free(decipher_buf);
     decipher_buf = (unsigned char *)buf;
   }

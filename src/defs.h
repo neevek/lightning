@@ -46,7 +46,7 @@ typedef struct {
   uv_write_t upstream_write_req;
   uv_getaddrinfo_t upstream_addrinfo_req;
   uv_connect_t upstream_connect_req;
-  char upstream_buf[SESSION_TCP_BUFSIZ]; 
+  char upstream_buf[SESSION_TCP_BUFSIZ + IV_LEN_AND_BLOCK_LEN]; 
 } TCPSession;
 
 typedef struct {
@@ -58,7 +58,7 @@ typedef struct {
   uv_udp_t *upstream_udp;
   uv_udp_send_t upstream_udp_send_req;
   uv_getaddrinfo_t upstream_udp_addrinfo_req;
-  char upstream_udp_buf[SESSION_UDP_BUFSIZ]; 
+  char upstream_udp_buf[SESSION_UDP_BUFSIZ + IV_LEN_AND_BLOCK_LEN]; 
 
   uv_udp_t *client_udp_send;
   uv_udp_send_t client_udp_send_req;

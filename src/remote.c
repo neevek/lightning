@@ -8,12 +8,10 @@
 #include "encrypt.h"
 
 #define SERVER_HOST "127.0.0.1"
-#define SERVER_PORT 8789
+#define SERVER_PORT 8790
 #define SERVER_BACKLOG 256
 #define KEEPALIVE 60
 
-#define REMOTE_SERVER_HOST "127.0.0.1"
-#define REMOTE_SERVER_PORT 8790
 #define REMOTE_SERVER_PASSWD "testpasswd"
 
 struct ServerContext;
@@ -63,20 +61,14 @@ static void close_handle(uv_handle_t *handle);
 static void handle_close_cb(uv_handle_t *handle);
 static void finish_socks5_tcp_handshake(Session *sess);
 static void finish_socks5_udp_handshake(Session *sess);
-static void finish_socks5_handshake(Session *sess, struct sockaddr *addr);
 
 static int client_tcp_read_start(uv_stream_t *handle);
 static int client_tcp_write_start(uv_stream_t *handle, const uv_buf_t *buf);
-static int client_tcp_write_string(uv_stream_t *handle, 
-    const char *data, int len);
-static int client_tcp_write_error(uv_stream_t *handle, int err);
 static void on_client_tcp_alloc(uv_handle_t *handle, size_t size, 
     uv_buf_t *buf);
 static void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread, 
     const uv_buf_t *buf);
 static void on_client_tcp_write_done(uv_write_t *req, int status);
-static void handle_socks5_method_identification(uv_stream_t *handle, 
-    ssize_t nread, const uv_buf_t *buf, Session *sess);
 static void handle_socks5_request(uv_stream_t *handle, 
     ssize_t nread, const uv_buf_t *buf, Session *sess);
 
@@ -129,9 +121,6 @@ void start_server(const char *host, int local_port, int backlog) {
   cipher_global_init();
   server_ctx.rs_cfg.passwd = REMOTE_SERVER_PASSWD;
   server_ctx.rs_cfg.cipher_name = "aes-256-cbc";
-  server_ctx.rs_cfg.ai_family = AF_INET;
-  uv_ip4_addr(REMOTE_SERVER_HOST, REMOTE_SERVER_PORT, 
-      (struct sockaddr_in *)&server_ctx.rs_cfg.addr);
 
   struct addrinfo hint;
   memset(&hint, 0, sizeof(hint));
@@ -209,8 +198,16 @@ void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res)
 
 Session *create_session() {
   Session *sess = lmalloc(sizeof(Session));
-  sess->state = S5_METHOD_IDENTIFICATION;
+  // on the remote side, we don't need SOCKS5 method identification
+  // get right into S5_REQUEST phrase
+  sess->state = S5_REQUEST;
   sess->type = SESSION_TYPE_UNKNOWN;
+
+  cipher_ctx_init(&sess->e_ctx, g_server_ctx->rs_cfg.cipher_name, 
+      g_server_ctx->rs_cfg.passwd);
+  cipher_ctx_init(&sess->d_ctx, g_server_ctx->rs_cfg.cipher_name, 
+      g_server_ctx->rs_cfg.passwd);
+
   return sess;
 }
 
@@ -326,34 +323,6 @@ int client_tcp_read_start(uv_stream_t *handle) {
   return err;
 }
 
-int client_tcp_write_error(uv_stream_t *handle, int err) {
-  Session *sess = (Session *)handle->data;
-  if (sess == NULL) {
-    return -1;
-  }
-
-  char buf[] = { 5, 1, 0, 1, 0, 0, 0, 0, 0, 0 };
-  sess->state = S5_SESSION_END; // cause the session be closed in on_write_done_cb
-
-  switch(err) {
-    case UV_ENETUNREACH: buf[1] = 3; break; // from the RFC: 3 = Network unreachable
-    case UV_EHOSTUNREACH: buf[1] = 4; break; // from the RFC: 4 = Host unreachable
-    case UV_ECONNREFUSED: buf[1] = 5; break;
-    case S5_UNSUPPORTED_CMD: buf[1] = 7; break;
-    case S5_BAD_ATYP: buf[1] = 8; break;
-    default: buf[1] = 1; break; // general SOCKS server failure
-  }
-
-  return client_tcp_write_string(handle, buf, 10);
-}
-
-int client_tcp_write_string(uv_stream_t *handle, const char *data, int len) {
-  uv_buf_t buf;
-  buf.base = (char *)data;
-  buf.len = len;
-  return client_tcp_write_start(handle, &buf);
-}
-
 int client_tcp_write_start(uv_stream_t *handle, const uv_buf_t *buf) {
   Session *sess = (Session *)handle->data;
   if (sess == NULL) {
@@ -389,10 +358,6 @@ void on_client_tcp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
   buf->len = sizeof(sess->client_buf) - IV_LEN_AND_BLOCK_LEN;
 }
 
-int is_proxy_connect(Session *sess) {
-  return sess->socks5_req_data_len > 0;
-}
-
 void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread, 
     const uv_buf_t *buf) {
   if (nread == 0) { // EAGAIN || EWOULDBLOCK
@@ -406,39 +371,24 @@ void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread,
   if (sess == NULL) {
     return;
   }
+
   if (nread < 0) {
     LOG_I("client read done: %s", uv_strerror(nread));
     close_session(sess);
     return;
   }
 
-  if (sess->state == S5_METHOD_IDENTIFICATION) {
-    handle_socks5_method_identification(handle, nread, buf, sess);
+  if (!decrypt(&sess->d_ctx, buf->base, (int *)&nread, 1)) {
+    LOG_E("passwd is incorrect");
+    close_session(sess);
+    return;
+  }
 
-  } else if (sess->state == S5_REQUEST) {
+  if (sess->state == S5_REQUEST) {
     handle_socks5_request(handle, nread, buf, sess);
 
   } else {
-    if (sess->state == S5_START_PROXY) {
-      uv_buf_t req_data_buf;
-      req_data_buf.base = sess->socks5_req_data;
-      req_data_buf.len = sess->socks5_req_data_len;
-      upstream_tcp_write_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp, 
-          &req_data_buf);
-
-      // after sending the first encrypted packet to remote, we enter streaming mode
-      sess->state = S5_STREAMING;
-    }
-
     if (sess->state == S5_STREAMING) { 
-      if (is_proxy_connect(sess)) {
-        if (!encrypt(&sess->e_ctx, buf->base, (int *)&nread, 1)) {
-          LOG_E("passwd incorrect");
-          close_session(sess);
-          return;
-        }
-      } 
-
       ((uv_buf_t *)buf)->len = nread;
       upstream_tcp_write_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp, 
           buf);
@@ -451,37 +401,6 @@ void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread,
   }
 }
 
-void handle_socks5_method_identification(uv_stream_t *handle, ssize_t nread, 
-    const uv_buf_t *buf, Session *sess) {
-    Socks5Ctx *s5_ctx = &sess->s5_ctx;
-
-    S5Err s5_err = socks5_parse_method_identification(s5_ctx, buf->base, nread);
-    if (s5_err != S5_OK) {
-      LOG_E("socks5_parse_method_identification failed");
-      close_session(sess);
-      return;
-    }
-
-    if (s5_ctx->state == S5_PARSE_STATE_FINISH) {
-      // we only support AUTH_NONE at the moment
-      if (s5_ctx->methods & S5_AUTH_NONE) { 
-        sess->state = S5_REQUEST;
-        client_tcp_write_string(handle, "\5\0", 2);
-
-        LOG_V("socks5 method identification passed");
-      } else {
-        // this state causes the session be closed in on_write_done_cb
-        sess->state = S5_SESSION_END;  
-        client_tcp_write_string(handle, "\5\xff", 2);
-        LOG_V("socks5 method not supported");
-      }
-
-    } else {
-      // need more data
-      client_tcp_read_start((uv_stream_t *)handle);
-    }
-}
-
 void handle_socks5_request(uv_stream_t *handle, ssize_t nread, 
     const uv_buf_t *buf, Session *sess) {
   Socks5Ctx *s5_ctx = &sess->s5_ctx;
@@ -489,7 +408,7 @@ void handle_socks5_request(uv_stream_t *handle, ssize_t nread,
   S5Err s5_err = socks5_parse_request(s5_ctx, buf->base, nread); 
   if (s5_err != S5_OK) {
     LOG_E("socks5_parse_request failed");
-    client_tcp_write_error(handle, s5_err);
+    close_session(sess);
     return;
   }
 
@@ -520,28 +439,7 @@ void handle_socks5_request(uv_stream_t *handle, ssize_t nread,
 
   int err;
   if ((err = init_tcp_handle(sess, &((TCPSession *)sess)->upstream_tcp)) < 0) {
-    client_tcp_write_error(handle, err);
-    return;
-  }
-
-  // REMOTE connect
-  if (1) {
-    cipher_ctx_init(&sess->e_ctx, g_server_ctx->rs_cfg.cipher_name, 
-        g_server_ctx->rs_cfg.passwd);
-    cipher_ctx_init(&sess->d_ctx, g_server_ctx->rs_cfg.cipher_name, 
-        g_server_ctx->rs_cfg.passwd);
-
-    sess->socks5_req_data_len = nread;
-    sess->socks5_req_data = encrypt(&sess->e_ctx, buf->base, 
-        &sess->socks5_req_data_len, 0);
-
-    int err = upstream_tcp_connect(&((TCPSession *)sess)->upstream_connect_req, 
-        (struct sockaddr *)&g_server_ctx->rs_cfg.addr);
-    if (err != 0) {
-      LOG_E("connecting to remote server failed: %s", uv_strerror(err));
-      client_tcp_write_error((uv_stream_t *)sess->client_tcp, err); 
-    }
-
+    close_session(sess);
     return;
   }
 
@@ -556,7 +454,7 @@ void handle_socks5_request(uv_stream_t *handle, ssize_t nread,
             (struct sockaddr *)&addr4)) != 0) {
       log_ipv4_and_port(s5_ctx->dst_addr, s5_ctx->dst_port, 
           "upstream connect failed");
-      client_tcp_write_error((uv_stream_t *)sess->client_tcp, err); 
+      close_session(sess);
     }
 
   } else if (s5_ctx->atyp == S5_ATYP_DOMAIN) {
@@ -576,7 +474,7 @@ void handle_socks5_request(uv_stream_t *handle, ssize_t nread,
 
       LOG_E("uv_getaddrinfo failed: %s, err: %s", 
           s5_ctx->dst_addr, uv_strerror(err));
-      client_tcp_write_error(handle, err);
+      close_session(sess);
       return;
     }
 
@@ -591,12 +489,12 @@ void handle_socks5_request(uv_stream_t *handle, ssize_t nread,
             (struct sockaddr *)&addr6)) != 0) {
       log_ipv6_and_port(s5_ctx->dst_addr, s5_ctx->dst_port, 
           "upstream connect failed");
-      client_tcp_write_error((uv_stream_t *)sess->client_tcp, err); 
+      close_session(sess);
     }
 
   } else {
     LOG_E("unknown ATYP: %d", s5_ctx->atyp);
-    client_tcp_write_error(handle, 20000);  // the error code is chosen at random
+    close_session(sess);
   }
 }
 
@@ -639,12 +537,10 @@ void on_upstream_tcp_read_done(uv_stream_t *handle, ssize_t nread,
     return;
   }
 
-  if (is_proxy_connect(sess)) {
-    if (!decrypt(&sess->d_ctx, buf->base, (int *)&nread, 1)) {
-      LOG_E("passwd is incorrect");
-      close_session(sess);
-      return;
-    }
+  if (!encrypt(&sess->e_ctx, buf->base, (int *)&nread, 1)) {
+    LOG_E("passwd incorrect");
+    close_session(sess);
+    return;
   }
 
   ((uv_buf_t *)buf)->len = nread;
@@ -681,7 +577,7 @@ void upstream_tcp_connect_domain(uv_getaddrinfo_t* req, int status,
   if (status < 0) {
     LOG_E("getaddrinfo(\"%s\"): %s", sess->s5_ctx.dst_addr, uv_strerror(status));
     uv_freeaddrinfo(res);
-    client_tcp_write_error((uv_stream_t *)sess->client_tcp, status);
+    close_session((Session *)sess);
     return;
   }
 
@@ -712,7 +608,7 @@ void upstream_tcp_connect_domain(uv_getaddrinfo_t* req, int status,
   }
 
   uv_freeaddrinfo(res);
-  client_tcp_write_error((uv_stream_t *)sess->client_tcp, err);
+  close_session((Session *)sess);
 }
 
 void upstream_tcp_connect_cb(uv_connect_t* req, int status) {
@@ -725,7 +621,7 @@ void upstream_tcp_connect_cb(uv_connect_t* req, int status) {
   if (status < 0) {
     int close_session_on_failed = (intptr_t)req->data;
     if (close_session_on_failed) {
-      client_tcp_write_error((uv_stream_t *)sess->client_tcp, status); 
+      close_session((Session *)sess);
     }
   } else {
     finish_socks5_tcp_handshake((Session *)sess);
@@ -739,16 +635,13 @@ void finish_socks5_tcp_handshake(Session *sess) {
   if ((err = uv_tcp_getsockname(((TCPSession *)sess)->upstream_tcp, 
           (struct sockaddr *)&addr, (int []){ sizeof(struct sockaddr) })) < 0) {
     LOG_W("uv_tcp_getsockname failed: %s", uv_strerror(err));
-    client_tcp_write_error((uv_stream_t *)sess->client_tcp, err);
+    close_session(sess);
     return;
   }
-  if (sess->socks5_req_data != NULL) {
-    sess->state = S5_START_PROXY;
-  } else {
-    sess->state = S5_STREAMING;
-  }
+  sess->state = S5_STREAMING;
 
-  finish_socks5_handshake(sess, (struct sockaddr *)&addr);
+  client_tcp_read_start((uv_stream_t *)sess->client_tcp);
+  upstream_tcp_read_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp);
 }
 
 void finish_socks5_udp_handshake(Session *sess) {
@@ -781,14 +674,12 @@ void finish_socks5_udp_handshake(Session *sess) {
   if ((err = uv_udp_getsockname(udp_sess->client_udp_recv, 
           (struct sockaddr *)&addr, (int []){ sizeof(addr) })) < 0) {
     LOG_W("uv_udp_getsockname failed: %s", uv_strerror(err));
-    client_tcp_write_error((uv_stream_t *)sess->client_tcp, err);
+    close_session(sess);
     return;
   }
 
   uv_udp_recv_start(udp_sess->client_udp_recv, on_client_udp_alloc, 
       on_client_udp_recv_done);
-
-  finish_socks5_handshake(sess, (struct sockaddr *)&addr);
 }
 
 void init_client_udp_send_if_needed(UDPSession *sess) {
