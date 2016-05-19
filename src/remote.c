@@ -203,9 +203,7 @@ Session *create_session() {
   sess->state = S5_REQUEST;
   sess->type = SESSION_TYPE_UNKNOWN;
 
-  cipher_ctx_init(&sess->e_ctx, g_server_ctx->rs_cfg.cipher_name, 
-      g_server_ctx->rs_cfg.passwd);
-  cipher_ctx_init(&sess->d_ctx, g_server_ctx->rs_cfg.cipher_name, 
+  cipher_ctx_init(&sess->cipher_ctx, g_server_ctx->rs_cfg.cipher_name, 
       g_server_ctx->rs_cfg.passwd);
 
   return sess;
@@ -265,6 +263,7 @@ void close_session(Session *sess) {
   sess->client_tcp->data = NULL;
   close_handle((uv_handle_t *)sess->client_tcp);
 
+  cipher_ctx_destroy(&sess->cipher_ctx);
   free(sess->socks5_req_data);
   free(sess);
 }
@@ -355,7 +354,7 @@ void on_client_tcp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
   Session *sess = (Session *)handle->data;
   buf->base = sess->client_buf;
   // reserve some space for encrypted version of the data
-  buf->len = sizeof(sess->client_buf) - IV_LEN_AND_BLOCK_LEN;
+  buf->len = sizeof(sess->client_buf);
 }
 
 void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread, 
@@ -378,7 +377,7 @@ void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread,
     return;
   }
 
-  if (!decrypt(&sess->d_ctx, buf->base, (int *)&nread, 1)) {
+  if (!decrypt(&sess->cipher_ctx, buf->base, (int *)&nread, 1)) {
     LOG_E("passwd is incorrect");
     close_session(sess);
     return;
@@ -515,7 +514,7 @@ int upstream_tcp_read_start(uv_stream_t *handle) {
 void on_upstream_tcp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
   TCPSession *sess = (TCPSession *)handle->data;
   buf->base = sess->upstream_buf;
-  buf->len = sizeof(sess->upstream_buf);
+  buf->len = sizeof(sess->upstream_buf) - IV_LEN_AND_BLOCK_LEN;
 }
 
 void on_upstream_tcp_read_done(uv_stream_t *handle, ssize_t nread, 
@@ -537,7 +536,7 @@ void on_upstream_tcp_read_done(uv_stream_t *handle, ssize_t nread,
     return;
   }
 
-  if (!encrypt(&sess->e_ctx, buf->base, (int *)&nread, 1)) {
+  if (!encrypt(&sess->cipher_ctx, buf->base, (int *)&nread, 1)) {
     LOG_E("passwd incorrect");
     close_session(sess);
     return;
@@ -608,6 +607,7 @@ void upstream_tcp_connect_domain(uv_getaddrinfo_t* req, int status,
   }
 
   uv_freeaddrinfo(res);
+  LOG_E("failed to connect to upstream");
   close_session((Session *)sess);
 }
 
@@ -621,6 +621,7 @@ void upstream_tcp_connect_cb(uv_connect_t* req, int status) {
   if (status < 0) {
     int close_session_on_failed = (intptr_t)req->data;
     if (close_session_on_failed) {
+      LOG_E("failed to connect to upstream");
       close_session((Session *)sess);
     }
   } else {
@@ -796,7 +797,7 @@ void on_client_udp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
   UDPSession *sess = (UDPSession *)handle->data;
   buf->base = sess->clinet_udp_recv_buf;
   // reserve some space for encrypted version of the data
-  buf->len = sizeof(sess->clinet_udp_recv_buf) - IV_LEN_AND_BLOCK_LEN;
+  buf->len = sizeof(sess->clinet_udp_recv_buf);
 }
 
 void on_client_udp_recv_done(uv_udp_t *handle, ssize_t nread, 
@@ -958,7 +959,7 @@ void on_upstream_udp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
   UDPSession *sess = (UDPSession *)handle->data;
   // 22 to encapsulate the header, see on_upstream_udp_recv_done
   buf->base = sess->upstream_udp_buf + 22;
-  buf->len = sizeof(sess->upstream_udp_buf) - 22; 
+  buf->len = sizeof(sess->upstream_udp_buf) - 22 - IV_LEN_AND_BLOCK_LEN;; 
 }
 
 void on_upstream_udp_recv_done(uv_udp_t *handle, ssize_t nread, 

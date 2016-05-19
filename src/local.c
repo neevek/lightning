@@ -211,6 +211,9 @@ Session *create_session() {
   Session *sess = lmalloc(sizeof(Session));
   sess->state = S5_METHOD_IDENTIFICATION;
   sess->type = SESSION_TYPE_UNKNOWN;
+
+  cipher_ctx_init(&sess->cipher_ctx, g_server_ctx->rs_cfg.cipher_name, 
+      g_server_ctx->rs_cfg.passwd);
   return sess;
 }
 
@@ -268,6 +271,7 @@ void close_session(Session *sess) {
   sess->client_tcp->data = NULL;
   close_handle((uv_handle_t *)sess->client_tcp);
 
+  cipher_ctx_destroy(&sess->cipher_ctx);
   free(sess->socks5_req_data);
   free(sess);
 }
@@ -419,20 +423,9 @@ void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread,
     handle_socks5_request(handle, nread, buf, sess);
 
   } else {
-    if (sess->state == S5_START_PROXY) {
-      uv_buf_t req_data_buf;
-      req_data_buf.base = sess->socks5_req_data;
-      req_data_buf.len = sess->socks5_req_data_len;
-      upstream_tcp_write_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp, 
-          &req_data_buf);
-
-      // after sending the first encrypted packet to remote, we enter streaming mode
-      sess->state = S5_STREAMING;
-    }
-
     if (sess->state == S5_STREAMING) { 
       if (is_proxy_connect(sess)) {
-        if (!encrypt(&sess->e_ctx, buf->base, (int *)&nread, 1)) {
+        if (!encrypt(&sess->cipher_ctx, buf->base, (int *)&nread, 1)) {
           LOG_E("passwd incorrect");
           close_session(sess);
           return;
@@ -526,13 +519,8 @@ void handle_socks5_request(uv_stream_t *handle, ssize_t nread,
 
   // REMOTE connect
   if (1) {
-    cipher_ctx_init(&sess->e_ctx, g_server_ctx->rs_cfg.cipher_name, 
-        g_server_ctx->rs_cfg.passwd);
-    cipher_ctx_init(&sess->d_ctx, g_server_ctx->rs_cfg.cipher_name, 
-        g_server_ctx->rs_cfg.passwd);
-
     sess->socks5_req_data_len = nread;
-    sess->socks5_req_data = encrypt(&sess->e_ctx, buf->base, 
+    sess->socks5_req_data = encrypt(&sess->cipher_ctx, buf->base, 
         &sess->socks5_req_data_len, 0);
 
     int err = upstream_tcp_connect(&((TCPSession *)sess)->upstream_connect_req, 
@@ -640,7 +628,8 @@ void on_upstream_tcp_read_done(uv_stream_t *handle, ssize_t nread,
   }
 
   if (is_proxy_connect(sess)) {
-    if (!decrypt(&sess->d_ctx, buf->base, (int *)&nread, 1)) {
+    LOG_I("upstream read len: %lu", nread);
+    if (!decrypt(&sess->cipher_ctx, buf->base, (int *)&nread, 1)) {
       LOG_E("passwd is incorrect");
       close_session(sess);
       return;
@@ -742,11 +731,17 @@ void finish_socks5_tcp_handshake(Session *sess) {
     client_tcp_write_error((uv_stream_t *)sess->client_tcp, err);
     return;
   }
+
+  // not a DIRECT connect, send the socks5 request to remote server
   if (sess->socks5_req_data != NULL) {
-    sess->state = S5_START_PROXY;
-  } else {
-    sess->state = S5_STREAMING;
+    uv_buf_t req_data_buf;
+    req_data_buf.base = sess->socks5_req_data;
+    req_data_buf.len = sess->socks5_req_data_len;
+    upstream_tcp_write_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp, 
+        &req_data_buf);
   }
+
+  sess->state = S5_STREAMING;
 
   finish_socks5_handshake(sess, (struct sockaddr *)&addr);
 }

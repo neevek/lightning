@@ -11,7 +11,6 @@ struct Socks5Ctx;
 typedef enum {
   S5_METHOD_IDENTIFICATION,
   S5_REQUEST,
-  S5_START_PROXY,
   S5_STREAMING,
   S5_SESSION_END,
 } SessionState;
@@ -29,8 +28,7 @@ typedef enum {
   char client_buf[SESSION_TCP_BUFSIZ + IV_LEN_AND_BLOCK_LEN]; \
   SessionState state; \
   Socks5Ctx s5_ctx; \
-  CipherCtx e_ctx; \
-  CipherCtx d_ctx; \
+  CipherCtx cipher_ctx; \
   char *socks5_req_data;  \
   int socks5_req_data_len; \
   SessionType type; 
