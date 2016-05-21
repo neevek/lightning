@@ -3,14 +3,17 @@
 #include <uv.h>
 #include "encrypt.h"
 
-#define SESSION_TCP_BUFSIZ 2048
+#define SESSION_TCP_BUFSIZ 1024
 #define SESSION_UDP_BUFSIZ 4096
+#define DEFAULT_CIPHER_NAME "aes-256-cfb"
+
 
 struct Socks5Ctx;
 
 typedef enum {
   S5_METHOD_IDENTIFICATION,
   S5_REQUEST,
+  S5_START_PROXY,
   S5_STREAMING,
   S5_SESSION_END,
 } SessionState;
@@ -28,7 +31,8 @@ typedef enum {
   char client_buf[SESSION_TCP_BUFSIZ + IV_LEN_AND_BLOCK_LEN]; \
   SessionState state; \
   Socks5Ctx s5_ctx; \
-  CipherCtx cipher_ctx; \
+  CipherCtx e_ctx; \
+  CipherCtx d_ctx; \
   char *socks5_req_data;  \
   int socks5_req_data_len; \
   SessionType type; 

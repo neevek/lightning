@@ -33,122 +33,101 @@ int cipher_ctx_init(CipherCtx *ctx, const char *cipher_name,
   }
 
   ctx->cipher = cipher;
-  ctx->evp_cipher_ctx = EVP_CIPHER_CTX_new();
-  ctx->iv_len = -1;
+  ctx->evp_cipher_ctx = NULL;
   return 0;
 }
 
-char *encrypt(CipherCtx *ctx, char *buf, INOUT int *len, int inplace) {
+char *stream_encrypt(CipherCtx *ctx, char *buf, INOUT int *len, int inplace) {
   assert(ctx && buf);
 
   int ilen = *len;
-  int olen = 0;
-  unsigned char *cipher_buf = NULL;
-  if (ctx->iv_len == -1) {
-    ctx->iv_len = EVP_CIPHER_iv_length(ctx->cipher);
-    if (ctx->iv_len > 0) {
-      ctx->iv = lmalloc(ctx->iv_len);
-      RAND_bytes(ctx->iv, ctx->iv_len);
 
-      cipher_buf = lmalloc(ilen + ctx->iv_len);
-      memcpy(cipher_buf, ctx->iv, ctx->iv_len);
-      olen += ctx->iv_len;
-    }
+  static int cipher_buf_len = 0;
+  static unsigned char *cipher_buf = NULL;
+  if (cipher_buf_len < ilen) {
+    cipher_buf_len = max(CIPHER_INIT_BUFSIZ, ilen) + EVP_MAX_IV_LENGTH;
+    cipher_buf = lrealloc(cipher_buf, cipher_buf_len);
   }
 
-  // set the cipher, the key and the IV on the cipher context
-  EVP_CipherInit_ex(ctx->evp_cipher_ctx, ctx->cipher, NULL, NULL, NULL, 1);
-  EVP_CIPHER_CTX_set_key_length(ctx->evp_cipher_ctx, ctx->key_len);
-  EVP_CipherInit_ex(ctx->evp_cipher_ctx, NULL, NULL, ctx->key, ctx->iv, 1);
+  int iv_len = 0;
+  if (ctx->evp_cipher_ctx == NULL) {
+    ctx->evp_cipher_ctx = EVP_CIPHER_CTX_new();
+    iv_len = EVP_CIPHER_iv_length(ctx->cipher);
+    unsigned char *iv = NULL;
+    if (iv_len > 0) {
+      RAND_bytes(cipher_buf, iv_len);
+      iv = cipher_buf;
+    }
 
-  if (cipher_buf) {
-    cipher_buf = lrealloc(cipher_buf, ilen + ctx->iv_len + 
-        EVP_CIPHER_CTX_block_size(ctx->evp_cipher_ctx));
-  } else {
-    cipher_buf = lmalloc(ilen + EVP_CIPHER_CTX_block_size(ctx->evp_cipher_ctx));
+    // set the cipher, the key and the IV on the cipher context
+    EVP_CipherInit_ex(ctx->evp_cipher_ctx, ctx->cipher, NULL, NULL, NULL, 1);
+    EVP_CIPHER_CTX_set_key_length(ctx->evp_cipher_ctx, ctx->key_len);
+    EVP_CipherInit_ex(ctx->evp_cipher_ctx, NULL, NULL, ctx->key, iv, 1);
   }
 
   int out = 0;
-  if (!EVP_CipherUpdate(ctx->evp_cipher_ctx, cipher_buf + olen, &out, 
+  if (!EVP_CipherUpdate(ctx->evp_cipher_ctx, cipher_buf + iv_len, &out, 
         (unsigned char *)buf, ilen)) {
     LOG_E("EVP_CipherUpdate failed");
-    free(cipher_buf);
     return NULL;
   }
-  olen += out;
+  *len = iv_len + out;
 
-  out = 0;
-  if (!EVP_CipherFinal_ex(ctx->evp_cipher_ctx, cipher_buf + olen, &out)) {
-    LOG_E("EVP_CipherFinal_ex failed");
-    free(cipher_buf);
-    return NULL;
-  }
-  olen += out;
-
+  char *pbuf;
   if (inplace) {
-    // assumes buf is big enough to store the encrypted data
-    memcpy(buf, cipher_buf, olen);
-    free(cipher_buf);
-    cipher_buf = (unsigned char *)buf;
+    pbuf = buf;
+  } else {
+    pbuf = lmalloc(*len);
   }
-  *len = olen;
-  return (char *)cipher_buf;
+
+  memcpy(pbuf, cipher_buf, *len);
+  return (char *)pbuf;
 }
 
-char *decrypt(CipherCtx *ctx, char *buf, INOUT int *len, int inplace) {
+char *stream_decrypt(CipherCtx *ctx, char *buf, INOUT int *len, int inplace) {
   assert(ctx && buf);
 
-  char *input_buf = buf;
   int ilen = *len;
+
+  static int decipher_buf_len = 0;
+  static unsigned char *decipher_buf = NULL;
+  if (decipher_buf_len < ilen) {
+    decipher_buf_len = max(CIPHER_INIT_BUFSIZ, ilen) + EVP_MAX_IV_LENGTH;
+    decipher_buf = lrealloc(decipher_buf, decipher_buf_len);
+  }
+
+  int iv_len = 0;
+  if (ctx->evp_cipher_ctx == NULL) {
+    ctx->evp_cipher_ctx = EVP_CIPHER_CTX_new();
+    unsigned char *iv = NULL;
+    iv_len = EVP_CIPHER_iv_length(ctx->cipher);
+    if (iv_len > 0) {
+      iv = (unsigned char *)buf;
+    }
+
+    // set the cipher, the key and the IV on the cipher context
+    EVP_CipherInit_ex(ctx->evp_cipher_ctx, ctx->cipher, NULL, NULL, NULL, 0);
+    EVP_CIPHER_CTX_set_key_length(ctx->evp_cipher_ctx, ctx->key_len);
+    EVP_CipherInit_ex(ctx->evp_cipher_ctx, NULL, NULL, ctx->key, iv, 0);
+  }
+
   int olen = 0;
-  if (ctx->iv_len == -1) {
-    ctx->iv_len = EVP_CIPHER_iv_length(ctx->cipher);
-    if (ilen < ctx->iv_len) {
-      LOG_E("length of IV is too small");
-      return NULL;
-    }
-
-    if (ctx->iv_len > 0) {
-      ctx->iv = lmalloc(ctx->iv_len);
-      memcpy(ctx->iv, buf, ctx->iv_len);
-      buf += ctx->iv_len;
-      ilen -= ctx->iv_len;
-    }
-  }
-
-  // set the cipher, the key and the IV on the cipher context
-  EVP_CipherInit_ex(ctx->evp_cipher_ctx, ctx->cipher, NULL, NULL, NULL, 0);
-  EVP_CIPHER_CTX_set_key_length(ctx->evp_cipher_ctx, ctx->key_len);
-  EVP_CipherInit_ex(ctx->evp_cipher_ctx, NULL, NULL, ctx->key, ctx->iv, 0);
-
-  unsigned char *decipher_buf = 
-    lmalloc(ilen + EVP_CIPHER_CTX_block_size(ctx->evp_cipher_ctx));
-
-  int out = 0;
-  if (!EVP_CipherUpdate(ctx->evp_cipher_ctx, decipher_buf, &out, 
-        (unsigned char *)buf, ilen)) {
+  if (!EVP_CipherUpdate(ctx->evp_cipher_ctx, decipher_buf, &olen, 
+        (unsigned char *)buf + iv_len, ilen - iv_len)) {
     LOG_E("EVP_CipherUpdate failed");
-    free(decipher_buf);
     return NULL;
   }
-  olen += out;
 
-  out = 0;
-  if (!EVP_CipherFinal_ex(ctx->evp_cipher_ctx, decipher_buf + olen, &out)) {
-    LOG_E("EVP_CipherFinal_ex failed");
-    free(decipher_buf);
-    return NULL;
-  }
-  olen += out;
-
+  char *pbuf;
   if (inplace) {
-    memcpy(input_buf, decipher_buf, olen);
-    free(decipher_buf);
-    decipher_buf = (unsigned char *)buf;
+    pbuf = buf;
+  } else {
+    pbuf = lmalloc(olen);
   }
-  *len = olen;
 
-  return (char *)decipher_buf;
+  *len = olen;
+  memcpy(pbuf, decipher_buf, olen);
+  return pbuf;
 }
 
 void cipher_ctx_destroy(CipherCtx *ctx) {
@@ -159,7 +138,6 @@ void cipher_ctx_destroy(CipherCtx *ctx) {
     EVP_CIPHER_CTX_free(ctx->evp_cipher_ctx);
   }
   free((void *)ctx->key);
-  free((void *)ctx->iv);
 }
 
 #ifdef DEBUG_ENCRYPT
@@ -169,46 +147,49 @@ int main(int argc, const char *argv[]) {
 
   const char *key = "AAAABBBBAAAABBBB123";
   CipherCtx ctx_e;
-  if (cipher_ctx_init(&ctx_e, "aes-256-cbc", key) < 0) {
-    fprintf(stderr, "can find aes-256-cbc");
+  if (cipher_ctx_init(&ctx_e, "aes-256-cfb", key) < 0) {
+    fprintf(stderr, "can find aes-256-cfb");
     abort();
   }
 
   CipherCtx ctx_d;
-  if (cipher_ctx_init(&ctx_d, "aes-256-cbc", key) < 0) {
-    fprintf(stderr, "can find aes-256-cbc");
+  if (cipher_ctx_init(&ctx_d, "aes-256-cfb", key) < 0) {
+    fprintf(stderr, "can find aes-256-cfb");
     abort();
   }
 
   char buf[] = "HelloWorld!";
-  char buf2[] = "somethign new";
+  char buf2[] = "something new";
   char buf3[] = "Hey OpenSSL";
 
   int len = sizeof(buf);
-  char *cipher_buf = encrypt(&ctx_e, buf, &len, 0);
+  printf("before: %d\n", len);
+  char *cipher_buf = stream_encrypt(&ctx_e, buf, &len, 0);
   printf("orig: %d\n", len);
-  char *orig_buf= decrypt(&ctx_d, cipher_buf, &len, 0);
+  char *orig_buf= stream_decrypt(&ctx_d, cipher_buf, &len, 0);
   printf("declen: %d\n", len);
   printf("dec: %s\n", orig_buf);
 
   len = sizeof(buf2);
-  cipher_buf = encrypt(&ctx_e, buf2, &len, 0);
+  printf("before: %d\n", len);
+  cipher_buf = stream_encrypt(&ctx_e, buf2, &len, 0);
   printf("orig: %d\n", len);
-  orig_buf= decrypt(&ctx_d, cipher_buf, &len, 0);
+  orig_buf= stream_decrypt(&ctx_d, cipher_buf, &len, 0);
   printf("declen: %d\n", len);
   printf("dec: %s\n", orig_buf);
 
   len = sizeof(buf3);
-  cipher_buf = encrypt(&ctx_e, buf3, &len, 0);
+  printf("before: %d\n", len);
+  cipher_buf = stream_encrypt(&ctx_e, buf3, &len, 0);
   printf("orig: %d\n", len);
-  orig_buf= decrypt(&ctx_d, cipher_buf, &len, 0);
+  orig_buf= stream_decrypt(&ctx_d, cipher_buf, &len, 0);
   printf("declen: %d\n", len);
   printf("dec: %s\n", orig_buf);
 
   char *str = strdup("this is a long string!!!");
   int slen = strlen(str) + 1;  // including terminating null
-  str = encrypt(&ctx_e, str, &slen, 1);
-  str = decrypt(&ctx_e, str, &slen, 1);
+  str = stream_encrypt(&ctx_e, str, &slen, 1);
+  str = stream_decrypt(&ctx_d, str, &slen, 1);
   printf("dec: %s\n", str);
   free(str);
 

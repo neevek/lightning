@@ -109,6 +109,8 @@ static void init_client_udp_send_if_needed(UDPSession *sess);
 static void client_udp_send_domain_resolved(uv_getaddrinfo_t *req, int status, 
     struct addrinfo *res);
 
+static int is_proxy_connect(Session *sess);
+
 int main(int argc, const char *argv[]) {
   start_server(SERVER_HOST, SERVER_PORT, SERVER_BACKLOG);
   return 0;
@@ -128,7 +130,7 @@ void start_server(const char *host, int local_port, int backlog) {
   // hardcode the server and port for testing 
   cipher_global_init();
   server_ctx.rs_cfg.passwd = REMOTE_SERVER_PASSWD;
-  server_ctx.rs_cfg.cipher_name = "aes-256-cbc";
+  server_ctx.rs_cfg.cipher_name = DEFAULT_CIPHER_NAME;
   server_ctx.rs_cfg.ai_family = AF_INET;
   uv_ip4_addr(REMOTE_SERVER_HOST, REMOTE_SERVER_PORT, 
       (struct sockaddr_in *)&server_ctx.rs_cfg.addr);
@@ -212,7 +214,9 @@ Session *create_session() {
   sess->state = S5_METHOD_IDENTIFICATION;
   sess->type = SESSION_TYPE_UNKNOWN;
 
-  cipher_ctx_init(&sess->cipher_ctx, g_server_ctx->rs_cfg.cipher_name, 
+  cipher_ctx_init(&sess->e_ctx, g_server_ctx->rs_cfg.cipher_name, 
+      g_server_ctx->rs_cfg.passwd);
+  cipher_ctx_init(&sess->d_ctx, g_server_ctx->rs_cfg.cipher_name, 
       g_server_ctx->rs_cfg.passwd);
   return sess;
 }
@@ -271,7 +275,8 @@ void close_session(Session *sess) {
   sess->client_tcp->data = NULL;
   close_handle((uv_handle_t *)sess->client_tcp);
 
-  cipher_ctx_destroy(&sess->cipher_ctx);
+  cipher_ctx_destroy(&sess->e_ctx);
+  cipher_ctx_destroy(&sess->d_ctx);
   free(sess->socks5_req_data);
   free(sess);
 }
@@ -399,6 +404,7 @@ int is_proxy_connect(Session *sess) {
 
 void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread, 
     const uv_buf_t *buf) {
+  LOG_I(">>>>>>>>>>>>>>>>>>>> before encrypt: %lu", nread);
   if (nread == 0) { // EAGAIN || EWOULDBLOCK
     return;
   }
@@ -425,12 +431,13 @@ void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread,
   } else {
     if (sess->state == S5_STREAMING) { 
       if (is_proxy_connect(sess)) {
-        if (!encrypt(&sess->cipher_ctx, buf->base, (int *)&nread, 1)) {
+        if (!stream_encrypt(&sess->e_ctx, buf->base, (int *)&nread, 1)) {
           LOG_E("passwd incorrect");
           close_session(sess);
           return;
         }
       } 
+      LOG_I(">>>>>>>>>>>>>>>>>>>> after encrypt: %lu", nread);
 
       ((uv_buf_t *)buf)->len = nread;
       upstream_tcp_write_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp, 
@@ -520,7 +527,7 @@ void handle_socks5_request(uv_stream_t *handle, ssize_t nread,
   // REMOTE connect
   if (1) {
     sess->socks5_req_data_len = nread;
-    sess->socks5_req_data = encrypt(&sess->cipher_ctx, buf->base, 
+    sess->socks5_req_data = stream_encrypt(&sess->e_ctx, buf->base, 
         &sess->socks5_req_data_len, 0);
 
     int err = upstream_tcp_connect(&((TCPSession *)sess)->upstream_connect_req, 
@@ -610,6 +617,7 @@ void on_upstream_tcp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
 
 void on_upstream_tcp_read_done(uv_stream_t *handle, ssize_t nread, 
     const uv_buf_t *buf) {
+  LOG_I(">>>>>>>>>>>>>>>>>>>> before decrypt: %lu", nread);
   if (nread == 0) { // EAGAIN || EWOULDBLOCK
     return;
   }
@@ -628,16 +636,26 @@ void on_upstream_tcp_read_done(uv_stream_t *handle, ssize_t nread,
   }
 
   if (is_proxy_connect(sess)) {
-    LOG_I("upstream read len: %lu", nread);
-    if (!decrypt(&sess->cipher_ctx, buf->base, (int *)&nread, 1)) {
+    if (!stream_decrypt(&sess->d_ctx, buf->base, (int *)&nread, 1)) {
       LOG_E("passwd is incorrect");
       close_session(sess);
       return;
     }
   }
+  LOG_I(">>>>>>>>>>>>>>>>>>>> after decrypt: %lu", nread);
 
-  ((uv_buf_t *)buf)->len = nread;
-  client_tcp_write_start((uv_stream_t *)sess->client_tcp, buf);
+  if (sess->state == S5_START_PROXY) {
+    if (nread != 2 || buf->base[0] != 'O' || buf->base[1] != 'K') {
+      LOG_E("remote ACK error");
+      close_session(sess);
+      return;
+    }
+    finish_socks5_tcp_handshake(sess);
+
+  } else {
+    ((uv_buf_t *)buf)->len = nread;
+    client_tcp_write_start((uv_stream_t *)sess->client_tcp, buf);
+  }
 }
 
 int upstream_tcp_write_start(uv_stream_t *handle, const uv_buf_t *buf) {
@@ -661,6 +679,7 @@ void on_upstream_tcp_write_done(uv_write_t *req, int status) {
     close_session((Session *)sess);
   } else {
     client_tcp_read_start((uv_stream_t *)sess->client_tcp);
+    upstream_tcp_read_start((uv_stream_t *)sess->upstream_tcp);
   }
 }
 
@@ -717,7 +736,19 @@ void upstream_tcp_connect_cb(uv_connect_t* req, int status) {
       client_tcp_write_error((uv_stream_t *)sess->client_tcp, status); 
     }
   } else {
-    finish_socks5_tcp_handshake((Session *)sess);
+    // not a DIRECT connect, send the socks5 request to remote server
+    if (sess->socks5_req_data != NULL) {
+      sess->state = S5_START_PROXY;
+
+      uv_buf_t req_data_buf;
+      req_data_buf.base = sess->socks5_req_data;
+      req_data_buf.len = sess->socks5_req_data_len;
+      upstream_tcp_write_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp, 
+          &req_data_buf);
+
+    } else {
+      finish_socks5_tcp_handshake((Session *)sess);
+    }
   }
 }
 
@@ -730,15 +761,6 @@ void finish_socks5_tcp_handshake(Session *sess) {
     LOG_W("uv_tcp_getsockname failed: %s", uv_strerror(err));
     client_tcp_write_error((uv_stream_t *)sess->client_tcp, err);
     return;
-  }
-
-  // not a DIRECT connect, send the socks5 request to remote server
-  if (sess->socks5_req_data != NULL) {
-    uv_buf_t req_data_buf;
-    req_data_buf.base = sess->socks5_req_data;
-    req_data_buf.len = sess->socks5_req_data_len;
-    upstream_tcp_write_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp, 
-        &req_data_buf);
   }
 
   sess->state = S5_STREAMING;
