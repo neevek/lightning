@@ -60,7 +60,6 @@ static void close_session(Session *sess);
 static void close_handle(uv_handle_t *handle);
 static void handle_close_cb(uv_handle_t *handle);
 static void finish_socks5_udp_handshake(Session *sess);
-static void finish_socks5_handshake(Session *sess, struct sockaddr *addr);
 
 static int client_tcp_read_start(uv_stream_t *handle);
 static int client_tcp_write_start(uv_stream_t *handle, const uv_buf_t *buf);
@@ -703,31 +702,6 @@ void init_client_udp_send_if_needed(UDPSession *sess) {
   } else 
 
   init_udp_handle((Session *)sess, &sess->client_udp_send);
-}
-
-void finish_socks5_handshake(Session *sess, struct sockaddr *addr) {
-  uv_buf_t buf = {
-    .base = sess->client_buf
-  };
-  memcpy(buf.base, "\5\0\0\1", 4);
-  uint16_t local_port = 0;
-  if (addr->sa_family == AF_INET) {
-    local_port = ((struct sockaddr_in *)addr)->sin_port;
-
-    buf.len = 10;
-    memcpy(buf.base+4, &((struct sockaddr_in *)addr)->sin_addr.s_addr, 4);
-    memcpy(buf.base+8, &local_port, 2);
-
-  } else {  // IPV6
-    local_port = ((struct sockaddr_in6 *)addr)->sin6_port;
-
-    buf.len = 22;
-    memcpy(buf.base+4, ((struct sockaddr_in6 *)addr)->sin6_addr.s6_addr, 16);
-    memcpy(buf.base+20, &local_port, 2);
-  }
-
-  LOG_I("new connection bound to local port: %d", ntohs(local_port));
-  client_tcp_write_start((uv_stream_t *)sess->client_tcp, &buf);
 }
 
 void upstream_tcp_connect_log(Session *sess, int status) {
