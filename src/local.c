@@ -395,7 +395,7 @@ void on_client_tcp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
   Session *sess = (Session *)handle->data;
   buf->base = sess->client_buf;
   // reserve some space for encrypted version of the data
-  buf->len = sizeof(sess->client_buf) - IV_LEN_AND_BLOCK_LEN;
+  buf->len = sizeof(sess->client_buf) - MAX_IV_LEN;
 }
 
 int is_proxy_connect(Session *sess) {
@@ -404,7 +404,6 @@ int is_proxy_connect(Session *sess) {
 
 void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread, 
     const uv_buf_t *buf) {
-  LOG_I(">>>>>>>>>>>>>>>>>>>> before encrypt: %lu", nread);
   if (nread == 0) { // EAGAIN || EWOULDBLOCK
     return;
   }
@@ -437,7 +436,6 @@ void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread,
           return;
         }
       } 
-      LOG_I(">>>>>>>>>>>>>>>>>>>> after encrypt: %lu", nread);
 
       ((uv_buf_t *)buf)->len = nread;
       upstream_tcp_write_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp, 
@@ -617,7 +615,6 @@ void on_upstream_tcp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
 
 void on_upstream_tcp_read_done(uv_stream_t *handle, ssize_t nread, 
     const uv_buf_t *buf) {
-  LOG_I(">>>>>>>>>>>>>>>>>>>> before decrypt: %lu", nread);
   if (nread == 0) { // EAGAIN || EWOULDBLOCK
     return;
   }
@@ -642,20 +639,9 @@ void on_upstream_tcp_read_done(uv_stream_t *handle, ssize_t nread,
       return;
     }
   }
-  LOG_I(">>>>>>>>>>>>>>>>>>>> after decrypt: %lu", nread);
 
-  if (sess->state == S5_START_PROXY) {
-    if (nread != 2 || buf->base[0] != 'O' || buf->base[1] != 'K') {
-      LOG_E("remote ACK error");
-      close_session(sess);
-      return;
-    }
-    finish_socks5_tcp_handshake(sess);
-
-  } else {
-    ((uv_buf_t *)buf)->len = nread;
-    client_tcp_write_start((uv_stream_t *)sess->client_tcp, buf);
-  }
+  ((uv_buf_t *)buf)->len = nread;
+  client_tcp_write_start((uv_stream_t *)sess->client_tcp, buf);
 }
 
 int upstream_tcp_write_start(uv_stream_t *handle, const uv_buf_t *buf) {
@@ -678,8 +664,11 @@ void on_upstream_tcp_write_done(uv_write_t *req, int status) {
     LOG_V("upstream write failed: %s", uv_strerror(status));
     close_session((Session *)sess);
   } else {
-    client_tcp_read_start((uv_stream_t *)sess->client_tcp);
-    upstream_tcp_read_start((uv_stream_t *)sess->upstream_tcp);
+    if (sess->state == S5_START_PROXY) {
+      finish_socks5_tcp_handshake((Session *)sess);
+    } else {
+      client_tcp_read_start((uv_stream_t *)sess->client_tcp);
+    }
   }
 }
 
@@ -922,7 +911,7 @@ void on_client_udp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
   UDPSession *sess = (UDPSession *)handle->data;
   buf->base = sess->clinet_udp_recv_buf;
   // reserve some space for encrypted version of the data
-  buf->len = sizeof(sess->clinet_udp_recv_buf) - IV_LEN_AND_BLOCK_LEN;
+  buf->len = sizeof(sess->clinet_udp_recv_buf) - MAX_IV_LEN;
 }
 
 void on_client_udp_recv_done(uv_udp_t *handle, ssize_t nread, 

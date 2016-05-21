@@ -59,7 +59,6 @@ static int init_tcp_handle(Session *sess, uv_tcp_t **tcp_handle);
 static void close_session(Session *sess);
 static void close_handle(uv_handle_t *handle);
 static void handle_close_cb(uv_handle_t *handle);
-static void finish_socks5_tcp_handshake(Session *sess);
 static void finish_socks5_udp_handshake(Session *sess);
 static void finish_socks5_handshake(Session *sess, struct sockaddr *addr);
 
@@ -298,7 +297,6 @@ void on_connection_new(uv_stream_t *server, int status) {
     return;
   }
 
-  LOG_V(">>>> accepted new connection");
   Session *sess = create_session();
 
   if (init_tcp_handle(sess, &sess->client_tcp) < 0) {
@@ -360,7 +358,6 @@ void on_client_tcp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
 
 void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread, 
     const uv_buf_t *buf) {
-  LOG_I(">>>>>>>>>>>>>>>>>>>> before decrypt: %lu", nread);
   if (nread == 0) { // EAGAIN || EWOULDBLOCK
     return;
   }
@@ -381,7 +378,6 @@ void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread,
     close_session(sess);
     return;
   }
-  LOG_I(">>>>>>>>>>>>>>>>>>>> after decrypt: %lu", nread);
 
   if (sess->state == S5_REQUEST) {
     handle_socks5_request(handle, nread, buf, sess);
@@ -511,12 +507,11 @@ int upstream_tcp_read_start(uv_stream_t *handle) {
 void on_upstream_tcp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
   TCPSession *sess = (TCPSession *)handle->data;
   buf->base = sess->upstream_buf;
-  buf->len = sizeof(sess->upstream_buf) - IV_LEN_AND_BLOCK_LEN;
+  buf->len = sizeof(sess->upstream_buf) - MAX_IV_LEN;
 }
 
 void on_upstream_tcp_read_done(uv_stream_t *handle, ssize_t nread, 
     const uv_buf_t *buf) {
-  LOG_I(">>>>>>>>>>>>>>>>>>>> before encrypt: %lu", nread);
   if (nread == 0) { // EAGAIN || EWOULDBLOCK
     return;
   }
@@ -536,7 +531,6 @@ void on_upstream_tcp_read_done(uv_stream_t *handle, ssize_t nread,
     close_session(sess);
     return;
   }
-  LOG_I(">>>>>>>>>>>>>>>>>>>> after encrypt: %lu", nread);
 
   ((uv_buf_t *)buf)->len = nread;
   client_tcp_write_start((uv_stream_t *)sess->client_tcp, buf);
@@ -615,36 +609,11 @@ void upstream_tcp_connect_cb(uv_connect_t* req, int status) {
       close_session((Session *)sess);
     }
   } else {
-    finish_socks5_tcp_handshake((Session *)sess);
+    // once connected, the connection enter streaming mode
+    sess->state = S5_STREAMING;
+    client_tcp_read_start((uv_stream_t *)sess->client_tcp);
+    upstream_tcp_read_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp);
   }
-}
-
-void finish_socks5_tcp_handshake(Session *sess) {
-  struct sockaddr_storage addr;
-  int err;
-
-  if ((err = uv_tcp_getsockname(((TCPSession *)sess)->upstream_tcp, 
-          (struct sockaddr *)&addr, (int []){ sizeof(struct sockaddr) })) < 0) {
-    LOG_W("uv_tcp_getsockname failed: %s", uv_strerror(err));
-    close_session(sess);
-    return;
-  }
-  sess->state = S5_STREAMING;
-
-  // ACK the client
-  int len = 2;
-  char ok_resp[2 + IV_LEN_AND_BLOCK_LEN] = { 'O', 'K' };
-  if (!stream_encrypt(&sess->e_ctx, ok_resp, (int *)&len, 1)) {
-    LOG_E("encrypting ok_resp failed");
-    close_session(sess);
-    return;
-  }
-
-  uv_buf_t buf = {
-    .base = ok_resp,
-    .len = len
-  };
-  client_tcp_write_start((uv_stream_t *)sess->client_tcp, &buf);
 }
 
 void finish_socks5_udp_handshake(Session *sess) {
@@ -958,7 +927,7 @@ void on_upstream_udp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
   UDPSession *sess = (UDPSession *)handle->data;
   // 22 to encapsulate the header, see on_upstream_udp_recv_done
   buf->base = sess->upstream_udp_buf + 22;
-  buf->len = sizeof(sess->upstream_udp_buf) - 22 - IV_LEN_AND_BLOCK_LEN;; 
+  buf->len = sizeof(sess->upstream_udp_buf) - 22 - MAX_IV_LEN;; 
 }
 
 void on_upstream_udp_recv_done(uv_udp_t *handle, ssize_t nread, 

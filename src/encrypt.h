@@ -3,7 +3,7 @@
 #include <openssl/evp.h>
 
 #define INOUT
-#define IV_LEN_AND_BLOCK_LEN (EVP_MAX_IV_LENGTH + EVP_MAX_BLOCK_LENGTH)
+#define MAX_IV_LEN EVP_MAX_IV_LENGTH
 #define CIPHER_INIT_BUFSIZ 8192
 
 #ifndef max
