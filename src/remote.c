@@ -245,7 +245,7 @@ int init_udp_handle(Session *sess, uv_udp_t **udp_handle) {
 }
 
 void close_session(Session *sess) {
-  LOG_V("now will close session");
+  /*LOG_V("now will close session");*/
   if (sess->type == SESSION_TYPE_TCP) {
     TCPSession *tcp_sess = (TCPSession *)sess;
     tcp_sess->upstream_tcp->data = NULL;
@@ -314,6 +314,9 @@ void on_connection_new(uv_stream_t *server, int status) {
 
 int client_tcp_read_start(uv_stream_t *handle) {
   Session *sess = (Session *)handle->data;
+  if (sess == NULL) {
+    return -1;
+  }
   int err;
   if ((err = uv_read_start(handle, on_client_tcp_alloc, on_client_tcp_read_done)) != 0) {
     LOG_E("uv_read_start failed: %s", uv_strerror(err));
@@ -325,6 +328,9 @@ int client_tcp_read_start(uv_stream_t *handle) {
 
 int client_tcp_write_start(uv_stream_t *handle, const uv_buf_t *buf) {
   Session *sess = (Session *)handle->data;
+  if (sess == NULL) {
+    return -1;
+  }
 
   int err;
   if ((err = uv_write(&sess->client_write_req, 
@@ -361,13 +367,18 @@ void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread,
     return;
   }
 
+  Session *sess = (Session *)handle->data;
+  if (sess == NULL) {
+    return;
+  }
+
   // stop reading so the buf can be reused and not overrun
   uv_read_stop(handle);
 
-  Session *sess = (Session *)handle->data;
-
   if (nread < 0) {
-    LOG_I("client read done: %s", uv_strerror(nread));
+    if (nread != UV_EOF) {
+      LOG_E("client read failed: %s", uv_strerror(nread));
+    }
     close_session(sess);
     return;
   }
@@ -494,6 +505,9 @@ void handle_socks5_request(uv_stream_t *handle, ssize_t nread,
 
 int upstream_tcp_read_start(uv_stream_t *handle) {
   Session *sess = (Session *)handle->data;
+  if (sess == NULL) {
+    return -1;
+  }
   int err;
   if ((err = uv_read_start(handle, on_upstream_tcp_alloc, 
           on_upstream_tcp_read_done)) != 0) {
@@ -515,12 +529,18 @@ void on_upstream_tcp_read_done(uv_stream_t *handle, ssize_t nread,
     return;
   }
 
+  Session *sess = (Session *)handle->data;
+  if (sess == NULL) {
+    return;
+  }
+
   // stop reading so the buf can be reused and not overrun
   uv_read_stop(handle);
 
-  Session *sess = (Session *)handle->data;
   if (nread < 0 || sess->state == S5_SESSION_END) {
-    LOG_V("upstream read failed: %s", uv_strerror(nread));
+    if (nread != UV_EOF) {
+      LOG_E("upstream read failed: %s", uv_strerror(nread));
+    }
     close_session(sess);
     return;
   }
@@ -748,7 +768,9 @@ void on_client_udp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
 void on_client_udp_recv_done(uv_udp_t *handle, ssize_t nread, 
     const uv_buf_t* buf, const struct sockaddr* addr, unsigned flags) {
   if (nread < 0) {
-    LOG_V("received udp packet failed: %s", uv_strerror(nread));
+    if (nread != UV_EOF) {
+      LOG_E("client udp packet failed: %s", uv_strerror(nread));
+    }
     return;
   }
 
@@ -907,7 +929,9 @@ void on_upstream_udp_alloc(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
 void on_upstream_udp_recv_done(uv_udp_t *handle, ssize_t nread, 
     const uv_buf_t *buf, const struct sockaddr *addr, unsigned flags) {
   if (nread < 0) {
-    LOG_V("received udp packet failed: %s", uv_strerror(nread));
+    if (nread != UV_EOF) {
+      LOG_E("upstream udp packet failed: %s", uv_strerror(nread));
+    }
     return;
   }
 
@@ -915,11 +939,14 @@ void on_upstream_udp_recv_done(uv_udp_t *handle, ssize_t nread,
     return;
   }
 
+  UDPSession *sess = (UDPSession *)handle->data;
+  if (sess == NULL) {
+    return;
+  }
+
   LOG_V("received udp packet: %lu", nread);
 
   uv_udp_recv_stop(handle);
-
-  UDPSession *sess = (UDPSession *)handle->data;
 
   if (addr->sa_family == AF_INET) {
     ((uv_buf_t *)buf)->base -= 10;
