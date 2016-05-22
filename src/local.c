@@ -227,13 +227,11 @@ int init_tcp_handle(Session *sess, uv_tcp_t **tcp_handle) {
   int err;
   if ((err = uv_tcp_init(g_loop, *tcp_handle)) != 0) {
     LOG_E("uv_tcp_init failed: %s", uv_strerror(err));
-    close_session(sess);
     return err;
   }
 
   if ((err = uv_tcp_keepalive(*tcp_handle, 1, KEEPALIVE)) != 0) {
     LOG_E("uv_tcp_keepalive failed: %s", uv_strerror(err));
-    close_session(sess);
     return err;
   }
 
@@ -255,23 +253,18 @@ int init_udp_handle(Session *sess, uv_udp_t **udp_handle) {
 }
 
 void close_session(Session *sess) {
-  /*LOG_V("now will close session: %p", sess);*/
+  LOG_V("now will close session: %p", sess);
   if (sess->s5_ctx.cmd == S5_CMD_CONNECT) {
     TCPSession *tcp_sess = (TCPSession *)sess;
-    tcp_sess->upstream_tcp->data = NULL;
     close_handle((uv_handle_t *)tcp_sess->upstream_tcp);
 
   } else if (sess->s5_ctx.cmd == S5_CMD_UDP_ASSOCIATE) {
     UDPSession *udp_sess = (UDPSession *)sess;
-    udp_sess->upstream_udp->data = NULL;
-    udp_sess->client_udp_send->data = NULL;
-    udp_sess->client_udp_recv->data = NULL;
     close_handle((uv_handle_t *)udp_sess->upstream_udp);
     close_handle((uv_handle_t *)udp_sess->client_udp_recv);
     close_handle((uv_handle_t *)udp_sess->client_udp_send);
   } 
 
-  sess->client_tcp->data = NULL;
   close_handle((uv_handle_t *)sess->client_tcp);
 
   cipher_ctx_destroy(&sess->e_ctx);
@@ -285,6 +278,7 @@ void close_handle(uv_handle_t *handle) {
     return;
   }
 
+  handle->data = NULL;
   if (handle->type == UV_TCP) {
     uv_read_stop((uv_stream_t *)handle);
   } else if (handle->type == UV_UDP) {
@@ -310,6 +304,7 @@ void on_connection_new(uv_stream_t *server, int status) {
   Session *sess = create_session();
 
   if (init_tcp_handle(sess, &sess->client_tcp) < 0) {
+    close_session(sess);
     return;
   }
 
@@ -877,7 +872,7 @@ void finish_socks5_handshake(Session *sess, struct sockaddr *addr) {
 
 void upstream_tcp_connect_log(Session *sess, int status) {
   if (is_proxy_connect(sess)) {
-    LOG_I("uv_tcp_connect: connected to remote proxy server");
+    LOG_I("connected to remote proxy server for sess: %p", sess);
     return;
   }
 

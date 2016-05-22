@@ -200,7 +200,6 @@ Session *create_session() {
   // on the remote side, we don't need SOCKS5 method identification
   // get right into S5_REQUEST phrase
   sess->state = S5_REQUEST;
-  sess->type = SESSION_TYPE_UNKNOWN;
 
   cipher_ctx_init(&sess->e_ctx, g_server_ctx->rs_cfg.cipher_name, 
       g_server_ctx->rs_cfg.passwd);
@@ -246,22 +245,17 @@ int init_udp_handle(Session *sess, uv_udp_t **udp_handle) {
 
 void close_session(Session *sess) {
   /*LOG_V("now will close session");*/
-  if (sess->type == SESSION_TYPE_TCP) {
+  if (sess->s5_ctx.cmd == S5_CMD_CONNECT) {
     TCPSession *tcp_sess = (TCPSession *)sess;
-    tcp_sess->upstream_tcp->data = NULL;
     close_handle((uv_handle_t *)tcp_sess->upstream_tcp);
 
-  } else if (sess->type == SESSION_TYPE_UDP) {
+  } else if (sess->s5_ctx.cmd == S5_CMD_UDP_ASSOCIATE) {
     UDPSession *udp_sess = (UDPSession *)sess;
-    udp_sess->upstream_udp->data = NULL;
-    udp_sess->client_udp_send->data = NULL;
-    udp_sess->client_udp_recv->data = NULL;
     close_handle((uv_handle_t *)udp_sess->upstream_udp);
     close_handle((uv_handle_t *)udp_sess->client_udp_recv);
     close_handle((uv_handle_t *)udp_sess->client_udp_send);
   }
 
-  sess->client_tcp->data = NULL;
   close_handle((uv_handle_t *)sess->client_tcp);
 
   cipher_ctx_destroy(&sess->e_ctx);
@@ -275,6 +269,7 @@ void close_handle(uv_handle_t *handle) {
     return;
   }
 
+  handle->data = NULL;
   if (handle->type == UV_TCP) {
     uv_read_stop((uv_stream_t *)handle);
   } else if (handle->type == UV_UDP) {
@@ -348,7 +343,7 @@ void on_client_tcp_write_done(uv_write_t *req, int status) {
     close_session(sess);
   } else {
     client_tcp_read_start((uv_stream_t *)sess->client_tcp);
-    if (sess->type == SESSION_TYPE_TCP && sess->state == S5_STREAMING) {
+    if (sess->s5_ctx.cmd == S5_CMD_CONNECT && sess->state == S5_STREAMING) {
       upstream_tcp_read_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp);
     }
   }
@@ -417,12 +412,7 @@ void handle_socks5_request(uv_stream_t *handle, ssize_t nread,
     return;
   }
 
-  // finished parsing the SOCKS request, now we know it is a 
-  // CONNECT or UDP ASSOCIATE request
-  sess->type = (s5_ctx->cmd == S5_CMD_UDP_ASSOCIATE ? 
-      SESSION_TYPE_UDP : SESSION_TYPE_TCP);
-
-  if (sess->type == SESSION_TYPE_UDP) {
+  if (sess->s5_ctx.cmd == S5_CMD_UDP_ASSOCIATE) {
     LOG_V("received a UDP request");
 
     sess = lrealloc(sess, sizeof(UDPSession));
