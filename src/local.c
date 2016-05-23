@@ -212,6 +212,7 @@ void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res)
 Session *create_session() {
   Session *sess = lmalloc(sizeof(Session));
   sess->state = S5_METHOD_IDENTIFICATION;
+  sess->type = SESSION_TYPE_UNKNOWN;
 
   cipher_ctx_init(&sess->e_ctx, g_server_ctx->rs_cfg.cipher_name, 
       g_server_ctx->rs_cfg.passwd);
@@ -253,17 +254,23 @@ int init_udp_handle(Session *sess, uv_udp_t **udp_handle) {
 }
 
 void close_session(Session *sess) {
+  sess->state = S5_CLOSING;
+
   LOG_V("now will close session: %p", sess);
-  if (sess->s5_ctx.cmd == S5_CMD_CONNECT) {
+  if (sess->type == SESSION_TYPE_TCP) {
     TCPSession *tcp_sess = (TCPSession *)sess;
     close_handle((uv_handle_t *)tcp_sess->upstream_tcp);
 
-  } else if (sess->s5_ctx.cmd == S5_CMD_UDP_ASSOCIATE) {
+  } else if (sess->type == SESSION_TYPE_UDP) {
     UDPSession *udp_sess = (UDPSession *)sess;
     close_handle((uv_handle_t *)udp_sess->upstream_udp);
     close_handle((uv_handle_t *)udp_sess->client_udp_recv);
     close_handle((uv_handle_t *)udp_sess->client_udp_send);
-  } 
+  } else {
+    // type is unknown, which means the SOCKS5 connection was not 
+    // successfully established before the session object is freed.
+    // and we should do NOTHING here
+  }
 
   close_handle((uv_handle_t *)sess->client_tcp);
 
@@ -339,7 +346,7 @@ int client_tcp_write_error(uv_stream_t *handle, int err) {
   }
 
   char buf[] = { 5, 1, 0, 1, 0, 0, 0, 0, 0, 0 };
-  sess->state = S5_SESSION_END; // cause the session be closed in on_write_done_cb
+  sess->state = S5_STREAMING_END; // cause the session be closed in on_write_done_cb
 
   switch(err) {
     case UV_ENETUNREACH: buf[1] = 3; break; // from the RFC: 3 = Network unreachable
@@ -377,12 +384,12 @@ int client_tcp_write_start(uv_stream_t *handle, const uv_buf_t *buf) {
 
 void on_client_tcp_write_done(uv_write_t *req, int status) {
   Session *sess = container_of(req, Session, client_write_req);
-  if (status < 0 || sess->state == S5_SESSION_END) {
+  if (status < 0 || sess->state == S5_STREAMING_END) {
     LOG_V("status=%d, now will close session", status);
     close_session(sess);
   } else {
     client_tcp_read_start((uv_stream_t *)sess->client_tcp);
-    if (sess->s5_ctx.cmd == S5_CMD_CONNECT && sess->state == S5_STREAMING) {
+    if (sess->type == SESSION_TYPE_TCP  && sess->state == S5_STREAMING) {
       upstream_tcp_read_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp);
     }
   }
@@ -406,7 +413,7 @@ void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread,
   }
 
   Session *sess = (Session *)handle->data;
-  if (sess == NULL) {
+  if (sess == NULL || sess->state == S5_CLOSING) {
     return;
   }
 
@@ -469,7 +476,7 @@ void handle_socks5_method_identification(uv_stream_t *handle, ssize_t nread,
         LOG_V("socks5 method identification passed");
       } else {
         // this state causes the session be closed in on_write_done_cb
-        sess->state = S5_SESSION_END;  
+        sess->state = S5_STREAMING_END;  
         client_tcp_write_string(handle, "\5\xff", 2);
         LOG_V("socks5 method not supported");
       }
@@ -491,7 +498,12 @@ void handle_socks5_request(uv_stream_t *handle, ssize_t nread,
     return;
   }
 
-  if (sess->s5_ctx.cmd == S5_CMD_UDP_ASSOCIATE) {
+  // finished parsing the SOCKS request, now we know it is a 
+  // CONNECT or UDP ASSOCIATE request
+  sess->type = (s5_ctx->cmd == S5_CMD_UDP_ASSOCIATE ? 
+      SESSION_TYPE_UDP : SESSION_TYPE_TCP); 
+
+  if (sess->type == SESSION_TYPE_UDP) {
     LOG_V("received a UDP request");
 
     sess = lrealloc(sess, sizeof(UDPSession));
@@ -614,14 +626,14 @@ void on_upstream_tcp_read_done(uv_stream_t *handle, ssize_t nread,
     return;
   }
   Session *sess = (Session *)handle->data;
-  if (sess == NULL) {
+  if (sess == NULL || sess->state == S5_CLOSING) {
     return;
   }
 
   // stop reading so the buf can be reused and not overrun
   uv_read_stop(handle);
 
-  if (nread < 0 || sess->state == S5_SESSION_END) {
+  if (nread < 0 || sess->state == S5_STREAMING_END) {
     if (nread != UV_EOF) {
       LOG_E("upstream read failed: %s", uv_strerror(nread));
     }
@@ -657,7 +669,7 @@ int upstream_tcp_write_start(uv_stream_t *handle, const uv_buf_t *buf) {
 
 void on_upstream_tcp_write_done(uv_write_t *req, int status) {
   TCPSession *sess = container_of(req, TCPSession, upstream_write_req);
-  if (status < 0 || sess->state == S5_SESSION_END) {
+  if (status < 0 || sess->state == S5_STREAMING_END) {
     LOG_V("upstream write failed: %s", uv_strerror(status));
     close_session((Session *)sess);
   } else {

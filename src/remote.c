@@ -245,11 +245,11 @@ int init_udp_handle(Session *sess, uv_udp_t **udp_handle) {
 
 void close_session(Session *sess) {
   /*LOG_V("now will close session");*/
-  if (sess->s5_ctx.cmd == S5_CMD_CONNECT) {
+  if (sess->type == SESSION_TYPE_TCP) {
     TCPSession *tcp_sess = (TCPSession *)sess;
     close_handle((uv_handle_t *)tcp_sess->upstream_tcp);
 
-  } else if (sess->s5_ctx.cmd == S5_CMD_UDP_ASSOCIATE) {
+  } else if (sess->type == SESSION_TYPE_UDP) {
     UDPSession *udp_sess = (UDPSession *)sess;
     close_handle((uv_handle_t *)udp_sess->upstream_udp);
     close_handle((uv_handle_t *)udp_sess->client_udp_recv);
@@ -338,12 +338,12 @@ int client_tcp_write_start(uv_stream_t *handle, const uv_buf_t *buf) {
 
 void on_client_tcp_write_done(uv_write_t *req, int status) {
   Session *sess = container_of(req, Session, client_write_req);
-  if (status < 0 || sess->state == S5_SESSION_END) {
+  if (status < 0 || sess->state == S5_STREAMING_END) {
     LOG_V("status=%d, now will close session", status);
     close_session(sess);
   } else {
     client_tcp_read_start((uv_stream_t *)sess->client_tcp);
-    if (sess->s5_ctx.cmd == S5_CMD_CONNECT && sess->state == S5_STREAMING) {
+    if (sess->type == SESSION_TYPE_TCP && sess->state == S5_STREAMING) {
       upstream_tcp_read_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp);
     }
   }
@@ -363,7 +363,7 @@ void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread,
   }
 
   Session *sess = (Session *)handle->data;
-  if (sess == NULL) {
+  if (sess == NULL || sess->state == S5_CLOSING) {
     return;
   }
 
@@ -412,7 +412,12 @@ void handle_socks5_request(uv_stream_t *handle, ssize_t nread,
     return;
   }
 
-  if (sess->s5_ctx.cmd == S5_CMD_UDP_ASSOCIATE) {
+  // finished parsing the SOCKS request, now we know it is a 
+  // CONNECT or UDP ASSOCIATE request
+  sess->type = (s5_ctx->cmd == S5_CMD_UDP_ASSOCIATE ? 
+      SESSION_TYPE_UDP : SESSION_TYPE_TCP); 
+
+  if (sess->type == SESSION_TYPE_UDP) {
     LOG_V("received a UDP request");
 
     sess = lrealloc(sess, sizeof(UDPSession));
@@ -520,14 +525,14 @@ void on_upstream_tcp_read_done(uv_stream_t *handle, ssize_t nread,
   }
 
   Session *sess = (Session *)handle->data;
-  if (sess == NULL) {
+  if (sess == NULL || sess->state == S5_CLOSING) {
     return;
   }
 
   // stop reading so the buf can be reused and not overrun
   uv_read_stop(handle);
 
-  if (nread < 0 || sess->state == S5_SESSION_END) {
+  if (nread < 0 || sess->state == S5_STREAMING_END) {
     if (nread != UV_EOF) {
       LOG_E("upstream read failed: %s", uv_strerror(nread));
     }
@@ -558,7 +563,7 @@ int upstream_tcp_write_start(uv_stream_t *handle, const uv_buf_t *buf) {
 
 void on_upstream_tcp_write_done(uv_write_t *req, int status) {
   TCPSession *sess = container_of(req, TCPSession, upstream_write_req);
-  if (status < 0 || sess->state == S5_SESSION_END) {
+  if (status < 0 || sess->state == S5_STREAMING_END) {
     LOG_V("upstream write failed: %s", uv_strerror(status));
     close_session((Session *)sess);
   } else {

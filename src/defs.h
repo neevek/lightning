@@ -15,8 +15,15 @@ typedef enum {
   S5_REQUEST,
   S5_START_PROXY,
   S5_STREAMING,
-  S5_SESSION_END,
+  S5_STREAMING_END,
+  S5_CLOSING,
 } SessionState;
+
+typedef enum {
+  SESSION_TYPE_UNKNOWN,
+  SESSION_TYPE_TCP,
+  SESSION_TYPE_UDP
+} SessionType;
 
  // 'socks5_req_data' is NULL if it is a DIRECT connection(no proxy)
 #define SESSION_FIELDS \
@@ -28,7 +35,8 @@ typedef enum {
   CipherCtx e_ctx; \
   CipherCtx d_ctx; \
   char *socks5_req_data;  \
-  int socks5_req_data_len;
+  int socks5_req_data_len; \
+  SessionType type;
 
 typedef struct {
   SESSION_FIELDS
