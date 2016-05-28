@@ -216,13 +216,11 @@ int init_tcp_handle(Session *sess, uv_tcp_t **tcp_handle) {
   int err;
   if ((err = uv_tcp_init(g_loop, *tcp_handle)) != 0) {
     LOG_E("uv_tcp_init failed: %s", uv_strerror(err));
-    close_session(sess);
     return err;
   }
 
   if ((err = uv_tcp_keepalive(*tcp_handle, 1, KEEPALIVE)) != 0) {
     LOG_E("uv_tcp_keepalive failed: %s", uv_strerror(err));
-    close_session(sess);
     return err;
   }
 
@@ -244,7 +242,12 @@ int init_udp_handle(Session *sess, uv_udp_t **udp_handle) {
 }
 
 void close_session(Session *sess) {
-  /*LOG_V("now will close session");*/
+  if (sess->state == S5_CLOSING) {
+    return;
+  }
+  sess->state = S5_CLOSING;
+
+  LOG_V("now will close session: %p", sess);
   if (sess->type == SESSION_TYPE_TCP) {
     TCPSession *tcp_sess = (TCPSession *)sess;
     close_handle((uv_handle_t *)tcp_sess->upstream_tcp);
@@ -254,6 +257,10 @@ void close_session(Session *sess) {
     close_handle((uv_handle_t *)udp_sess->upstream_udp);
     close_handle((uv_handle_t *)udp_sess->client_udp_recv);
     close_handle((uv_handle_t *)udp_sess->client_udp_send);
+  } else {
+    // type is unknown, which means the SOCKS5 connection was not 
+    // successfully established before the session object is freed.
+    // and we should do NOTHING here
   }
 
   close_handle((uv_handle_t *)sess->client_tcp);
@@ -294,6 +301,7 @@ void on_connection_new(uv_stream_t *server, int status) {
   Session *sess = create_session();
 
   if (init_tcp_handle(sess, &sess->client_tcp) < 0) {
+    close_session(sess);
     return;
   }
 
@@ -592,8 +600,8 @@ void upstream_tcp_connect_domain(uv_getaddrinfo_t* req, int status,
     }
 
     
-    int close_session_on_failed = ai->ai_next == NULL;
-    sess->upstream_connect_req.data = (void *)(intptr_t)close_session_on_failed;
+    int keep_session_alive = ai->ai_next != NULL;
+    sess->upstream_connect_req.data = (void *)(intptr_t)keep_session_alive;
     if ((err = upstream_tcp_connect(&sess->upstream_connect_req, 
             (struct sockaddr *)&addr)) != 0) {
       LOG_W("upstream_tcp_connect failed on %s:%d, err: %s",
@@ -617,9 +625,8 @@ void upstream_tcp_connect_cb(uv_connect_t* req, int status) {
 
   upstream_tcp_connect_log((Session *)sess, status);
   if (status < 0) {
-    int close_session_on_failed = (intptr_t)req->data;
-    if (close_session_on_failed) {
-      LOG_E("failed to connect to upstream");
+    int keep_session_alive = (intptr_t)req->data;
+    if (!keep_session_alive) {
       close_session((Session *)sess);
     }
   } else {
@@ -648,8 +655,12 @@ void finish_socks5_udp_handshake(Session *sess) {
   }
 
   UDPSession *udp_sess = (UDPSession *)sess;
-  init_udp_handle(sess, &udp_sess->upstream_udp);
-  init_udp_handle(sess, &udp_sess->client_udp_recv);
+  if (init_udp_handle(sess, &udp_sess->upstream_udp) < 0) {
+    return;
+  }
+  if (init_udp_handle(sess, &udp_sess->client_udp_recv) < 0) {
+    return;
+  }
   uv_udp_bind(udp_sess->client_udp_recv, (struct sockaddr *)&addr, 
       UV_UDP_REUSEADDR);
 
@@ -1033,9 +1044,14 @@ void client_udp_send_domain_resolved(uv_getaddrinfo_t* req, int status,
       memcpy(sess->s5_ctx.dst_addr, sai6->sin6_addr.s6_addr, 16);
     }
 
-    init_udp_handle((Session *)sess, &sess->client_udp_send);
-    break;
+    if (init_udp_handle((Session *)sess, &sess->client_udp_send) < 0) {
+      continue;
+    }
+
+    uv_freeaddrinfo(res);
+    return;
   }
 
+  close_session((Session *)sess);
   uv_freeaddrinfo(res);
 }
