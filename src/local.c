@@ -6,15 +6,12 @@
 #include "socks5.h"
 #include "defs.h"
 #include "encrypt.h"
+#include "cli.h"
 
 #define SERVER_HOST "127.0.0.1"
 #define SERVER_PORT 8789
 #define SERVER_BACKLOG 256
 #define KEEPALIVE 60
-
-#define REMOTE_SERVER_HOST "127.0.0.1"
-#define REMOTE_SERVER_PORT 8790
-#define REMOTE_SERVER_PASSWD "testpasswd"
 
 struct ServerContext;
 static struct ServerContext *g_server_ctx;
@@ -30,7 +27,7 @@ typedef struct {
   int ai_family;   
   struct sockaddr_storage addr;
   const char *cipher_name;
-  const char *passwd;
+  const char *cipher_secret;
 } RemoteServerCfg;
 
 typedef enum {
@@ -48,7 +45,7 @@ typedef struct ServerContext {
   uint8_t bound_ip[16];
 } ServerContext;
 
-static void start_server(const char *host, int local_port, int backlog);
+static void start_server(int argc, const char *argv[]);
 static void do_bind_and_listen(uv_getaddrinfo_t* req, int status, 
     struct addrinfo* res);
 static void on_connection_new(uv_stream_t *server, int status);
@@ -112,27 +109,44 @@ static void client_udp_send_domain_resolved(uv_getaddrinfo_t *req, int status,
 static int is_proxy_connect(Session *sess);
 
 int main(int argc, const char *argv[]) {
-  start_server(SERVER_HOST, SERVER_PORT, SERVER_BACKLOG);
+  start_server(argc, argv);
   return 0;
 }
 
-void start_server(const char *host, int local_port, int backlog) {
+void start_server(int argc, const char *argv[]) {
+  char *local_host;
+  int local_port;
+  char *remote_host;
+  int remote_port;
+  char *cipher_name;
+  char *cipher_secret;
+
+  handle_local_server_args(
+      argc,
+      argv,
+      &local_host,
+      &local_port,
+      &remote_host,
+      &remote_port,
+      &cipher_name,
+      &cipher_secret);
+
   g_loop = uv_default_loop();
 
   ServerContext server_ctx;
   memset(&server_ctx, 0, sizeof(ServerContext));
   g_server_ctx = &server_ctx;
 
-  server_ctx.server_cfg.host = host;
+  server_ctx.server_cfg.host = local_host;
   server_ctx.server_cfg.local_port = local_port;
-  server_ctx.server_cfg.backlog = backlog;
+  server_ctx.server_cfg.backlog = SERVER_BACKLOG;
 
   // hardcode the server and port for testing 
   cipher_global_init();
-  server_ctx.rs_cfg.passwd = REMOTE_SERVER_PASSWD;
-  server_ctx.rs_cfg.cipher_name = DEFAULT_CIPHER_NAME;
+  server_ctx.rs_cfg.cipher_name = cipher_name;
+  server_ctx.rs_cfg.cipher_secret = cipher_secret;
   server_ctx.rs_cfg.ai_family = AF_INET;
-  uv_ip4_addr(REMOTE_SERVER_HOST, REMOTE_SERVER_PORT, 
+  uv_ip4_addr(remote_host, remote_port, 
       (struct sockaddr_in *)&server_ctx.rs_cfg.addr);
 
   struct addrinfo hint;
@@ -144,7 +158,7 @@ void start_server(const char *host, int local_port, int backlog) {
   CHECK(uv_getaddrinfo(g_loop, 
                        &server_ctx.addrinfo_req, 
                        do_bind_and_listen, 
-                       host, 
+                       local_host, 
                        NULL, 
                        &hint) == 0);
 
@@ -215,9 +229,9 @@ Session *create_session() {
   sess->type = SESSION_TYPE_UNKNOWN;
 
   cipher_ctx_init(&sess->e_ctx, g_server_ctx->rs_cfg.cipher_name, 
-      g_server_ctx->rs_cfg.passwd);
+      g_server_ctx->rs_cfg.cipher_secret);
   cipher_ctx_init(&sess->d_ctx, g_server_ctx->rs_cfg.cipher_name, 
-      g_server_ctx->rs_cfg.passwd);
+      g_server_ctx->rs_cfg.cipher_secret);
   return sess;
 }
 
@@ -441,7 +455,7 @@ void on_client_tcp_read_done(uv_stream_t *handle, ssize_t nread,
     if (sess->state == S5_STREAMING) { 
       if (is_proxy_connect(sess)) {
         if (!stream_encrypt(&sess->e_ctx, buf->base, (int *)&nread, 1)) {
-          LOG_E("passwd incorrect");
+          LOG_E("cipher_secret incorrect");
           close_session(sess);
           return;
         }
@@ -646,7 +660,7 @@ void on_upstream_tcp_read_done(uv_stream_t *handle, ssize_t nread,
 
   if (is_proxy_connect(sess)) {
     if (!stream_decrypt(&sess->d_ctx, buf->base, (int *)&nread, 1)) {
-      LOG_E("passwd is incorrect");
+      LOG_E("cipher_secret is incorrect");
       close_session(sess);
       return;
     }

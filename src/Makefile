@@ -2,11 +2,11 @@ CC=gcc
 CFLAGS=-c -Wall -O0 -g -DLOG_VERBOSE
 LDFLAGS=-luv -lcrypto -lssl
 
-SRCS_FOR_LOCAL=alloc.c local.c socks5.c util.c encrypt.c
+SRCS_FOR_LOCAL=alloc.c local.c socks5.c util.c encrypt.c cli.c
 OBJS_FOR_LOCAL=$(SRCS_FOR_LOCAL:.c=.o)
 EXECUTABLE_LOCAL=lightning
 
-SRCS_FOR_REMOTE=alloc.c remote.c socks5.c util.c encrypt.c
+SRCS_FOR_REMOTE=alloc.c remote.c socks5.c util.c encrypt.c cli.c
 OBJS_FOR_REMOTE=$(SRCS_FOR_REMOTE:.c=.o)
 EXECUTABLE_REMOTE=lightning_remote
 

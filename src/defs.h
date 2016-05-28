@@ -7,7 +7,6 @@
 #define SESSION_UDP_BUFSIZ 4096
 #define DEFAULT_CIPHER_NAME "aes-256-cfb"
 
-
 struct Socks5Ctx;
 
 typedef enum {

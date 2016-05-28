@@ -1,8 +1,3 @@
-A simple SOCKS5 server implemented using libuv
-----------------------------------------------
+A simple socks5 server with payload encryption support & udp relay.
 
-TODO:
------
-
-- adding support for udp relay
-- adding support for data encryption
+depends on `libuv`, `openssl`.
