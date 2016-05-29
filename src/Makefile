@@ -1,5 +1,5 @@
 CC=gcc
-CFLAGS=-c -Wall -O0 -g -DLOG_VERBOSE
+CFLAGS=-c -Wall -O0 -g -DLOG_VERBOSE -std=c99
 LDFLAGS=-luv -lcrypto -lssl
 
 SRCS_FOR_LOCAL=alloc.c local.c socks5.c util.c encrypt.c cli.c
