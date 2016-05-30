@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>    // for va_list, va_start and va_end
+#include <time.h>
 #include <sys/time.h>
 
 #ifdef __ANDROID__
