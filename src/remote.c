@@ -446,6 +446,9 @@ void handle_socks5_request(uv_stream_t *handle, ssize_t nread,
   sess->type = (s5_ctx->cmd == S5_CMD_UDP_ASSOCIATE ? 
       SESSION_TYPE_UDP : SESSION_TYPE_TCP); 
 
+  // this is necessary, because after realloc memory for the sess object,
+  // its address may be changed and any other objects that reference it 
+  // should do the re-assignment
   uv_write_t *client_write_req = sess->client_write_req;
 
   if (sess->type == SESSION_TYPE_UDP) {
@@ -453,8 +456,8 @@ void handle_socks5_request(uv_stream_t *handle, ssize_t nread,
 
     sess = lrealloc(sess, sizeof(UDPSession));
     memset(((char *)sess)+sizeof(Session), 0, sizeof(UDPSession)-sizeof(Session));
-    // re-assign the session object for client_tcp, because the memory address
-    // may have been changed after realloc
+    // re-assign the session object, because the memory address may have been 
+    // changed after realloc
     handle->data = sess;  
     client_write_req->data = sess;
 
@@ -465,8 +468,8 @@ void handle_socks5_request(uv_stream_t *handle, ssize_t nread,
   // alright, it is a CONNECT request
   sess = lrealloc(sess, sizeof(TCPSession));
   memset(((char *)sess)+sizeof(Session), 0, sizeof(TCPSession)-sizeof(Session));
-  // re-assign the session object for client_tcp, because the memory address
-  // may have been changed after realloc
+  // re-assign the session object, because the memory address may have been 
+  // changed after realloc
   handle->data = sess;
   client_write_req->data = sess;
 
