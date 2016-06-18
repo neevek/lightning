@@ -13,6 +13,7 @@ void local_server_usage(const char *cmd, int exit_code) {
       "    --remote_host   the port this server connects to\n"
       "    --cipher_name   the cipher used to encrypt & decrypt the payloads\n"
       "    --cipher_secret the secret key\n"
+      "    --user          run as user\n"
       , cmd);
   exit(exit_code);
 }
@@ -25,6 +26,7 @@ void remote_server_usage(const char *cmd, int exit_code) {
       "    --local_port    the port this server to be bound\n"
       "    --cipher_name   the cipher used to encrypt & decrypt the payloads\n"
       "    --cipher_secret the secret key\n"
+      "    --user          run as user\n"
       , cmd);
   exit(exit_code);
 }
@@ -49,25 +51,29 @@ void handle_remote_server_args(
     char **local_host,
     int *local_port,
     char **cipher_name,
-    char **cipher_secret) {
+    char **cipher_secret,
+    char **user
+    ) {
 
   *local_host = NULL;
   *local_port = 0;
   *cipher_name = NULL;
   *cipher_secret = NULL;
+  *user = NULL;
 
   static struct option long_options[] = {
     {"help",          no_argument,       0, 1},
     {"local_host",    required_argument, 0, 'a'},
     {"local_port",    required_argument, 0, 'b'},
     {"cipher_name",   required_argument, 0, 'c'},
-    {"cipher_secret",  required_argument, 0, 'd'},
+    {"cipher_secret", required_argument, 0, 'd'},
+    {"user",          required_argument, 0, 'e'},
     {0, 0, 0, 0}
   };
 
   int optind = 0;
   char c;
-  while((c = getopt_long(argc, (char **)argv, "a:b:c:d:",
+  while((c = getopt_long(argc, (char **)argv, "a:b:c:d:e:",
           long_options, &optind)) != -1) {
     switch(c) {
       case 0:
@@ -88,6 +94,9 @@ void handle_remote_server_args(
       case 'd':
         *cipher_secret = optarg;
         break;
+      case 'e':
+        *user = optarg;
+        break;
       default:
         remote_server_usage(argv[0], 1);
     }
@@ -106,7 +115,9 @@ void handle_local_server_args(
     char **remote_host,
     int *remote_port,
     char **cipher_name,
-    char **cipher_secret) {
+    char **cipher_secret,
+    char **user
+    ) {
 
   *local_host = NULL;
   *local_port = 0;
@@ -114,6 +125,7 @@ void handle_local_server_args(
   *remote_port = 0;
   *cipher_name = NULL;
   *cipher_secret = NULL;
+  *user = NULL;
 
   static struct option long_options[] = {
     {"help",          no_argument,       0, 1},
@@ -122,13 +134,14 @@ void handle_local_server_args(
     {"remote_host",   required_argument, 0, 'c'},
     {"remote_port",   required_argument, 0, 'd'},
     {"cipher_name",   required_argument, 0, 'e'},
-    {"cipher_secret",  required_argument, 0, 'f'},
+    {"cipher_secret", required_argument, 0, 'f'},
+    {"user",          required_argument, 0, 'g'},
     {0, 0, 0, 0}
   };
 
   int optind = 0;
   char c;
-  while((c = getopt_long(argc, (char **)argv, "a:b:c:d:e:f:",
+  while((c = getopt_long(argc, (char **)argv, "a:b:c:d:e:f:g:",
           long_options, &optind)) != -1) {
     switch(c) {
       case 0:
@@ -155,6 +168,9 @@ void handle_local_server_args(
         break;
       case 'f':
         *cipher_secret = optarg;
+        break;
+      case 'g':
+        *user = optarg;
         break;
       default:
         local_server_usage(argv[0], 1);

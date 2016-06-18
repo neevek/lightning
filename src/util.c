@@ -1,5 +1,8 @@
 #include "util.h"
 #include <uv.h>
+#include <pwd.h>
+#include <unistd.h>
+#include <errno.h>
 #include "log/log.h"
 
 void log_ipv4_and_port(void *ipv4, int port, const char *msg) {
@@ -64,4 +67,33 @@ int is_ipv6_addr_local(const char *ip) {
     }
   }
   return ip[15] == 1;
+}
+
+int do_setuid(const char *user) {
+  const size_t pwd_buf_size = 8192;
+  struct passwd pwd, *result;
+  char pwd_buf[pwd_buf_size];
+  int status = getpwnam_r(user, &pwd, pwd_buf, pwd_buf_size, &result);
+  if (result == NULL) {
+    if (status > 0) {
+      LOG_E("getpwnam_r failed: %s", strerror(errno));
+    } else {
+      LOG_E("user %s not found", user);
+    }
+    return -1;
+  }
+
+  int euid = geteuid();
+  int egid = getegid();
+
+  status = setegid(pwd.pw_gid);
+  status = seteuid(pwd.pw_uid);
+  if (status == EINVAL || status == EPERM) {
+    LOG_E("setegid or seteuid failed");
+    return -1;
+  }
+
+  LOG_I("switched egid from %d to %d, euid from %d to %d", 
+      egid, getegid(), euid, geteuid());
+  return 0;
 }

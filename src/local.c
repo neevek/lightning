@@ -119,6 +119,7 @@ void start_server(int argc, const char *argv[]) {
   int remote_port;
   char *cipher_name;
   char *cipher_secret;
+  char *user;
 
   handle_local_server_args(
       argc,
@@ -128,7 +129,9 @@ void start_server(int argc, const char *argv[]) {
       &remote_host,
       &remote_port,
       &cipher_name,
-      &cipher_secret);
+      &cipher_secret,
+      &user
+      );
 
   g_loop = uv_default_loop();
 
@@ -154,6 +157,7 @@ void start_server(int argc, const char *argv[]) {
   hint.ai_socktype = SOCK_STREAM;
   hint.ai_protocol = IPPROTO_TCP;
 
+  server_ctx.addrinfo_req.data = user;
   CHECK(uv_getaddrinfo(g_loop, 
                        &server_ctx.addrinfo_req, 
                        do_bind_and_listen, 
@@ -215,6 +219,11 @@ void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res)
     
     LOG_I("server listening on %s:%d", ipstr, g_server_ctx->server_cfg.local_port);
     uv_freeaddrinfo(res);
+
+    char *user = req->data;
+    if (user) {
+      do_setuid(user);
+    }
     return;
   }
 

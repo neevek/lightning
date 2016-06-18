@@ -25,5 +25,6 @@ int is_ipv4_addr_any(const char *ip);
 int is_ipv4_addr_local(const char *ip);
 int is_ipv6_addr_any(const char *ip);
 int is_ipv6_addr_local(const char *ip);
+int do_setuid(const char *user);
 
 #endif /* end of include guard: UTIL_H_ */
