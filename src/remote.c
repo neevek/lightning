@@ -380,7 +380,10 @@ void on_client_tcp_write_done(uv_write_t *req, int status) {
     LOG_V("status=%d, now will close session", status);
     close_session(sess);
   } else {
-    client_tcp_read_start((uv_stream_t *)sess->client_tcp);
+    // the "if conditional" here is actually not necessary, because the state
+    // must be S5_STREAMING when writing back to the client for the first time
+    // see also "upstream_tcp_connect_cb" where the S5_STREAMING state is set
+    // Keep the "if conditional" here for helping understanding
     if (sess->type == SESSION_TYPE_TCP && sess->state == S5_STREAMING) {
       upstream_tcp_read_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp);
     }

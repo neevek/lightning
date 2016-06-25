@@ -435,7 +435,22 @@ void on_client_tcp_write_done(uv_write_t *req, int status) {
     LOG_V("status=%d, now will close session", status);
     close_session(sess);
   } else {
-    client_tcp_read_start((uv_stream_t *)sess->client_tcp);
+    // when in S5_STREAMING state, client_tcp_read_start will be called in 
+    // on_upstream_tcp_write_done, so DON'T call it here, otherwise
+    // sess->upstream_write_req will be reused while it is still in use in the
+    // libuv SEND_QUEUE, which is an UB, uv_write_t* can only be reused after
+    // the write callback is fired.
+    // see: https://github.com/libuv/libuv/issues/425
+    if (sess->state < S5_STREAMING) {
+      if (sess->state == S5_FINISHING_HANDSHAKE) {
+        sess->state = S5_STREAMING;
+      }
+      client_tcp_read_start((uv_stream_t *)sess->client_tcp);
+    }
+
+    // the "if conditional" here is NECESSARY, which is different from the case
+    // in remote.c, because we need to write back to the client for several 
+    // times to do the protocol negotiation before entering S5_STREAMING state
     if (sess->type == SESSION_TYPE_TCP  && sess->state == S5_STREAMING) {
       upstream_tcp_read_start((uv_stream_t *)((TCPSession *)sess)->upstream_tcp);
     }
@@ -801,6 +816,8 @@ void upstream_tcp_connect_cb(uv_connect_t* req, int status) {
 }
 
 void finish_socks5_tcp_handshake(Session *sess) {
+  sess->state = S5_FINISHING_HANDSHAKE;
+
   struct sockaddr_storage addr;
   int err;
 
@@ -810,8 +827,6 @@ void finish_socks5_tcp_handshake(Session *sess) {
     client_tcp_write_error((uv_stream_t *)sess->client_tcp, err);
     return;
   }
-
-  sess->state = S5_STREAMING;
 
   finish_socks5_handshake(sess, (struct sockaddr *)&addr);
 }

@@ -3,7 +3,7 @@
 #include <uv.h>
 #include "encrypt.h"
 
-#define SESSION_TCP_BUFSIZ 1024
+#define SESSION_TCP_BUFSIZ 8192
 #define SESSION_UDP_BUFSIZ 4096
 #define DEFAULT_CIPHER_NAME "aes-256-cfb"
 
@@ -12,7 +12,8 @@ struct Socks5Ctx;
 typedef enum {
   S5_METHOD_IDENTIFICATION,
   S5_REQUEST,
-  S5_START_PROXY,
+  S5_START_PROXY,           // only used in local.c
+  S5_FINISHING_HANDSHAKE,   // only used in local.c
   S5_STREAMING,
   S5_STREAMING_END,
   S5_CLOSING,
