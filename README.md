@@ -1,3 +1,3 @@
-A simple socks5 server with payload encryption support & udp relay.
+A socks5 server with payload encryption support & udp relay, written in readable code.
 
-depends on `libuv`, `openssl`.
+depends on `libuv` and `openssl`.

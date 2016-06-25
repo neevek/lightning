@@ -10,8 +10,6 @@
 #include "encrypt.h"
 #include "cli.h"
 
-#define SERVER_HOST "127.0.0.1"
-#define SERVER_PORT 8790
 #define SERVER_BACKLOG 256
 #define KEEPALIVE 60
 
@@ -135,7 +133,6 @@ void start_server(int argc, const char *argv[]) {
       log_to_file = 1;
     }
   }
-
   if (log_to_file) {
     redirect_stderr_to_file(log_file ? log_file : "/tmp/lightning_local.log");
   }
