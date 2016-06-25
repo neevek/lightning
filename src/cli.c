@@ -14,6 +14,7 @@ void local_server_usage(const char *cmd, int exit_code) {
       "    -c, --cipher_name   the cipher used to encrypt & decrypt the payloads\n"
       "    -s, --cipher_secret the secret key\n"
       "    -u, --user          run as user\n"
+      "    -l, --log_file      path to log file, stderr if absent\n"
       "    -D, --daemon        run the process in the background\n"
       "    --help          print this help message\n"
       , cmd);
@@ -28,6 +29,7 @@ void remote_server_usage(const char *cmd, int exit_code) {
       "    -c, --cipher_name   the cipher used to encrypt & decrypt the payloads\n"
       "    -s, --cipher_secret the secret key\n"
       "    -u, --user          run as user\n"
+      "    -l, --log_file      path to log file, stderr if absent\n"
       "    -D, --daemon        run the process in the background\n"
       "    --help          print this help message\n"
       , cmd);
@@ -54,6 +56,7 @@ void handle_remote_server_args(
     char **cipher_name,
     char **cipher_secret,
     char **user,
+    char **log_file,
     int *daemon_flag
     ) {
 
@@ -62,6 +65,7 @@ void handle_remote_server_args(
   *cipher_name = NULL;
   *cipher_secret = NULL;
   *user = NULL;
+  *log_file = NULL;
   *daemon_flag = 0;
 
   static struct option long_options[] = {
@@ -71,13 +75,14 @@ void handle_remote_server_args(
     {"cipher_name",   required_argument, 0, 'c'},
     {"cipher_secret", required_argument, 0, 's'},
     {"user",          required_argument, 0, 'u'},
+    {"log_file",      required_argument, 0, 'l'},
     {"daemon",        no_argument,       0, 'D'},
     {0, 0, 0, 0}
   };
 
   int optind = 0;
   char c;
-  while((c = getopt_long(argc, (char **)argv, "h:p:c:s:u:D",
+  while((c = getopt_long(argc, (char **)argv, "h:p:c:s:u:l:D",
           long_options, &optind)) != -1) {
     switch(c) {
       case 0:
@@ -104,6 +109,9 @@ void handle_remote_server_args(
       case 'u':
         *user = optarg;
         break;
+      case 'l':
+        *log_file = optarg;
+        break;
       case 'D':
         *daemon_flag = 1;
         break;
@@ -127,6 +135,7 @@ void handle_local_server_args(
     char **cipher_name,
     char **cipher_secret,
     char **user,
+    char **log_file,
     int *daemon_flag
     ) {
 
@@ -136,6 +145,7 @@ void handle_local_server_args(
   *remote_port = 0;
   *cipher_name = NULL;
   *cipher_secret = NULL;
+  *log_file = NULL;
   *user = NULL;
 
   static struct option long_options[] = {
@@ -147,13 +157,14 @@ void handle_local_server_args(
     {"cipher_name",   required_argument, 0, 'c'},
     {"cipher_secret", required_argument, 0, 's'},
     {"user",          required_argument, 0, 'u'},
+    {"log_file",      required_argument, 0, 'l'},
     {"daemon",        no_argument,       0, 'D'},
     {0, 0, 0, 0}
   };
 
   int optind = 0;
   char c;
-  while((c = getopt_long(argc, (char **)argv, "h:p:H:P:c:s:u:D",
+  while((c = getopt_long(argc, (char **)argv, "h:p:H:P:c:s:u:l:D",
           long_options, &optind)) != -1) {
     switch(c) {
       case 0:
@@ -185,6 +196,9 @@ void handle_local_server_args(
         break;
       case 'u':
         *user = optarg;
+        break;
+      case 'l':
+        *log_file = optarg;
         break;
       case 'D':
         *daemon_flag = 1;

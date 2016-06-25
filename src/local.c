@@ -122,6 +122,7 @@ void start_server(int argc, const char *argv[]) {
   char *cipher_name;
   char *cipher_secret;
   char *user;
+  char *log_file;
   int daemon_flag;
 
   handle_local_server_args(
@@ -134,13 +135,22 @@ void start_server(int argc, const char *argv[]) {
       &cipher_name,
       &cipher_secret,
       &user,
+      &log_file,
       &daemon_flag
       );
 
+  int log_to_file = !!log_file;
   if (daemon_flag) {
     if(daemon(0, 0) == -1 && errno != 0) {
-      LOG_E("daemon failed: %s", strerror(errno));
+      LOG_E("failed to put the process in background: %s", strerror(errno));
+    } else {
+      // when in background, write log to a file
+      log_to_file = 1;
     }
+  }
+
+  if (log_to_file) {
+    redirect_stderr_to_file(log_file ? log_file : "/tmp/lightning_local.log");
   }
 
   g_loop = uv_default_loop();
@@ -338,7 +348,7 @@ void handle_close_cb(uv_handle_t *handle) {
   free(handle);
 
   if (sess->heap_obj_count == 0) {
-    LOG_I("now will free the session object: %p", sess);
+    LOG_V("now will free the session object: %p", sess);
     cipher_ctx_destroy(&sess->e_ctx);
     cipher_ctx_destroy(&sess->d_ctx);
     free(sess->socks5_req_data);

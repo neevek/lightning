@@ -97,3 +97,12 @@ int do_setuid(const char *user) {
       egid, getegid(), euid, geteuid());
   return 0;
 }
+
+void redirect_stderr_to_file(const char *log_file) {
+  FILE *old_stderr = stderr;
+  stderr = fopen(log_file, "w");
+  if (stderr == NULL) {
+    fprintf(old_stderr, "failed to open log file: %s", log_file);
+    exit(1);
+  }
+}

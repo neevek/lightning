@@ -26,5 +26,6 @@ int is_ipv4_addr_local(const char *ip);
 int is_ipv6_addr_any(const char *ip);
 int is_ipv6_addr_local(const char *ip);
 int do_setuid(const char *user);
+void redirect_stderr_to_file(const char *log_file);
 
 #endif /* end of include guard: UTIL_H_ */

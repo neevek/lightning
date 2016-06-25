@@ -9,6 +9,7 @@ int handle_remote_server_args(
     char **cipher_name,
     char **cipher_secret,
     char **user,
+    char **log_file,
     int *daemon_flag
     );
 
@@ -22,6 +23,7 @@ int handle_local_server_args(
     char **cipher_name,
     char **cipher_secret,
     char **user,
+    char **log_file,
     int *daemon_flag
     );
 
