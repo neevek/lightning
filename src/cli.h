@@ -8,7 +8,8 @@ int handle_remote_server_args(
     int *local_port,
     char **cipher_name,
     char **cipher_secret,
-    char **user
+    char **user,
+    int *daemon_flag
     );
 
 int handle_local_server_args(
@@ -20,7 +21,8 @@ int handle_local_server_args(
     int *remote_port,
     char **cipher_name,
     char **cipher_secret,
-    char **user
+    char **user,
+    int *daemon_flag
     );
 
 #endif /* end of include guard: CLI_H_ */

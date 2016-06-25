@@ -122,7 +122,7 @@ void start_server(int argc, const char *argv[]) {
   char *cipher_name;
   char *cipher_secret;
   char *user;
-  /*int daemon_flag;*/
+  int daemon_flag;
 
   handle_local_server_args(
       argc,
@@ -133,14 +133,15 @@ void start_server(int argc, const char *argv[]) {
       &remote_port,
       &cipher_name,
       &cipher_secret,
-      &user
+      &user,
+      &daemon_flag
       );
 
-  /*if (daemon_flag) {*/
-    /*if(daemon(0, 0) == -1 && errno != 0) {*/
-      /*LOG_E("daemon failed: %s", strerror(errno));*/
-    /*}*/
-  /*}*/
+  if (daemon_flag) {
+    if(daemon(0, 0) == -1 && errno != 0) {
+      LOG_E("daemon failed: %s", strerror(errno));
+    }
+  }
 
   g_loop = uv_default_loop();
 
