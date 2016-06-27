@@ -24,7 +24,8 @@ typedef struct {
 } ServerCfg;
 
 typedef struct {
-  int ai_family;   
+  const char *host;
+  int remote_port;
   struct sockaddr_storage addr;
   const char *cipher_name;
   const char *cipher_secret;
@@ -37,6 +38,7 @@ typedef enum {
 
 typedef struct ServerContext {
   uv_getaddrinfo_t addrinfo_req;
+  uv_getaddrinfo_t rs_addrinfo_req;
   uv_tcp_t server_tcp;
   ServerCfg server_cfg;
   RemoteServerCfg rs_cfg;
@@ -47,6 +49,8 @@ typedef struct ServerContext {
 
 static void start_server(int argc, const char *argv[]);
 static void do_bind_and_listen(uv_getaddrinfo_t* req, int status, 
+    struct addrinfo* res);
+static void on_remote_host_resolved(uv_getaddrinfo_t* req, int status, 
     struct addrinfo* res);
 static void on_connection_new(uv_stream_t *server, int status);
 
@@ -164,27 +168,65 @@ void start_server(int argc, const char *argv[]) {
   cipher_global_init();
   server_ctx.rs_cfg.cipher_name = cipher_name;
   server_ctx.rs_cfg.cipher_secret = cipher_secret;
-  server_ctx.rs_cfg.ai_family = AF_INET;
-  uv_ip4_addr(remote_host, remote_port, 
-      (struct sockaddr_in *)&server_ctx.rs_cfg.addr);
+  server_ctx.rs_cfg.host = remote_host;
+  server_ctx.rs_cfg.remote_port = remote_port;
+
+  // used after local host is resolved and bound a port. 
+  // The reason we do setuid after binding on local port is that the local port
+  // may be under 1024, which requires root permission
+  server_ctx.addrinfo_req.data = user;
 
   struct addrinfo hint;
   memset(&hint, 0, sizeof(hint));
   hint.ai_family = AF_UNSPEC;
   hint.ai_socktype = SOCK_STREAM;
   hint.ai_protocol = IPPROTO_TCP;
-
-  server_ctx.addrinfo_req.data = user;
   CHECK(uv_getaddrinfo(g_loop, 
-                       &server_ctx.addrinfo_req, 
-                       do_bind_and_listen, 
-                       local_host, 
+                       &g_server_ctx->rs_addrinfo_req, 
+                       on_remote_host_resolved, 
+                       remote_host, 
                        NULL, 
                        &hint) == 0);
 
   uv_run(g_loop, UV_RUN_DEFAULT);
   uv_loop_close(g_loop);
   uv_loop_delete(g_loop);
+}
+
+void on_remote_host_resolved(uv_getaddrinfo_t* req, int status, 
+    struct addrinfo* res) {
+  if (status < 0 || res == NULL) {
+    LOG_E("cannot resolve remote host(\"%s\"): %s", g_server_ctx->rs_cfg.host, 
+        uv_strerror(status));
+    exit(1);
+  }
+
+  char ipstr[INET6_ADDRSTRLEN];
+  // only the first ip in the list is used, so if the selected ip here is 
+  // unreachable, do not use domain name for the --remote_host option, use a 
+  // usable ip directly
+  if (fill_ipaddr((struct sockaddr *)&g_server_ctx->rs_cfg.addr, 
+        htons(g_server_ctx->rs_cfg.remote_port), 
+        ipstr, sizeof(ipstr), res) != 0) {
+    exit(1);
+  }
+
+  LOG_I("remote host [%s] resolved to [%s]", g_server_ctx->rs_cfg.host, ipstr);
+  uv_freeaddrinfo(res);
+
+  // remote host is resolved successfully, now resolve local host and bind on
+  // the specified port for local host.
+  struct addrinfo hint;
+  memset(&hint, 0, sizeof(hint));
+  hint.ai_family = AF_UNSPEC;
+  hint.ai_socktype = SOCK_STREAM;
+  hint.ai_protocol = IPPROTO_TCP;
+  CHECK(uv_getaddrinfo(g_loop, 
+                       &g_server_ctx->addrinfo_req, 
+                       do_bind_and_listen, 
+                       g_server_ctx->server_cfg.host, 
+                       NULL, 
+                       &hint) == 0);
 }
 
 void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res) {
