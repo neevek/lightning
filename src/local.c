@@ -1,7 +1,8 @@
 #include <stdio.h>
-#include <uv.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <uv.h>
+
 #include "log/log.h"
 #include "util.h"
 #include "alloc.h"
@@ -13,19 +14,15 @@
 #define SERVER_BACKLOG 256
 #define KEEPALIVE 60
 
-struct ServerContext;
-static struct ServerContext *g_server_ctx;
-static uv_loop_t *g_loop;
-
 typedef struct {
   const char *host;
-  int local_port;
+  int port;
   int backlog;
-} ServerCfg;
+} LocalServerCfg;
 
 typedef struct {
   const char *host;
-  int remote_port;
+  int port;
   struct sockaddr_storage addr;
   const char *cipher_name;
   const char *cipher_secret;
@@ -36,16 +33,20 @@ typedef enum {
   IPV6
 } IPVersion;
 
-typedef struct ServerContext {
-  uv_getaddrinfo_t addrinfo_req;
-  uv_getaddrinfo_t rs_addrinfo_req;
-  uv_tcp_t server_tcp;
-  ServerCfg server_cfg;
-  RemoteServerCfg rs_cfg;
+typedef struct {
+  uv_getaddrinfo_t ls_addrinfo_req;
+  uv_tcp_t ls_server_tcp;
+  LocalServerCfg ls_sfg;
 
   IPVersion bound_ip_version;
   uint8_t bound_ip[16];
+
+  uv_getaddrinfo_t rs_addrinfo_req;
+  RemoteServerCfg rs_cfg;
 } ServerContext;
+
+static ServerContext *g_server_ctx;
+static uv_loop_t *g_loop;
 
 static void start_server(int argc, const char *argv[]);
 static void do_bind_and_listen(uv_getaddrinfo_t* req, int status, 
@@ -160,21 +161,21 @@ void start_server(int argc, const char *argv[]) {
   memset(&server_ctx, 0, sizeof(ServerContext));
   g_server_ctx = &server_ctx;
 
-  server_ctx.server_cfg.host = local_host;
-  server_ctx.server_cfg.local_port = local_port;
-  server_ctx.server_cfg.backlog = SERVER_BACKLOG;
+  server_ctx.ls_sfg.host = local_host;
+  server_ctx.ls_sfg.port = local_port;
+  server_ctx.ls_sfg.backlog = SERVER_BACKLOG;
 
-  // hardcode the server and port for testing 
-  cipher_global_init();
   server_ctx.rs_cfg.cipher_name = cipher_name;
   server_ctx.rs_cfg.cipher_secret = cipher_secret;
   server_ctx.rs_cfg.host = remote_host;
-  server_ctx.rs_cfg.remote_port = remote_port;
+  server_ctx.rs_cfg.port = remote_port;
 
   // used after local host is resolved and bound a port. 
   // The reason we do setuid after binding on local port is that the local port
   // may be under 1024, which requires root permission
-  server_ctx.addrinfo_req.data = user;
+  server_ctx.ls_addrinfo_req.data = user;
+
+  cipher_global_init();
 
   struct addrinfo hint;
   memset(&hint, 0, sizeof(hint));
@@ -206,7 +207,7 @@ void on_remote_host_resolved(uv_getaddrinfo_t* req, int status,
   // unreachable, do not use domain name for the --remote_host option, use a 
   // usable ip directly
   if (fill_ipaddr((struct sockaddr *)&g_server_ctx->rs_cfg.addr, 
-        htons(g_server_ctx->rs_cfg.remote_port), 
+        htons(g_server_ctx->rs_cfg.port), 
         ipstr, sizeof(ipstr), res) != 0) {
     exit(1);
   }
@@ -222,29 +223,29 @@ void on_remote_host_resolved(uv_getaddrinfo_t* req, int status,
   hint.ai_socktype = SOCK_STREAM;
   hint.ai_protocol = IPPROTO_TCP;
   CHECK(uv_getaddrinfo(g_loop, 
-                       &g_server_ctx->addrinfo_req, 
+                       &g_server_ctx->ls_addrinfo_req, 
                        do_bind_and_listen, 
-                       g_server_ctx->server_cfg.host, 
+                       g_server_ctx->ls_sfg.host, 
                        NULL, 
                        &hint) == 0);
 }
 
 void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res) {
   if (status < 0) {
-    LOG_E("getaddrinfo(\"%s\"): %s", g_server_ctx->server_cfg.host, 
+    LOG_E("getaddrinfo(\"%s\"): %s", g_server_ctx->ls_sfg.host, 
         uv_strerror(status));
     uv_freeaddrinfo(res);
     return;
   }
 
   // abort if failing to init uv_tcp_t
-  CHECK(uv_tcp_init(g_loop, &g_server_ctx->server_tcp) == 0);
+  CHECK(uv_tcp_init(g_loop, &g_server_ctx->ls_server_tcp) == 0);
 
   struct sockaddr_storage addr;
   char ipstr[INET6_ADDRSTRLEN];
 
   for (struct addrinfo *ai = res; ai != NULL; ai = ai->ai_next) {
-    if (fill_ipaddr((struct sockaddr *)&addr, htons(g_server_ctx->server_cfg.local_port), 
+    if (fill_ipaddr((struct sockaddr *)&addr, htons(g_server_ctx->ls_sfg.port), 
           ipstr, sizeof(ipstr), ai) != 0) {
       continue;
     }
@@ -261,22 +262,22 @@ void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res)
     }
 
     int err;
-    if ((err = uv_tcp_bind(&g_server_ctx->server_tcp, 
+    if ((err = uv_tcp_bind(&g_server_ctx->ls_server_tcp, 
             (struct sockaddr *)&addr, 0)) != 0) {
       LOG_W("uv_tcp_bind on %s:%d failed: %s", 
-          ipstr, g_server_ctx->server_cfg.local_port, uv_strerror(err));
+          ipstr, g_server_ctx->ls_sfg.port, uv_strerror(err));
       continue;
     }
 
-    if ((err = uv_listen((uv_stream_t *)&g_server_ctx->server_tcp, 
-          g_server_ctx->server_cfg.backlog, 
+    if ((err = uv_listen((uv_stream_t *)&g_server_ctx->ls_server_tcp, 
+          g_server_ctx->ls_sfg.backlog, 
           on_connection_new)) != 0) {
       LOG_W("uv_tcp_listen on %s:%d failed: %s", 
-          ipstr, g_server_ctx->server_cfg.local_port, uv_strerror(err));
+          ipstr, g_server_ctx->ls_sfg.port, uv_strerror(err));
       continue;
     }
     
-    LOG_I("server listening on %s:%d", ipstr, g_server_ctx->server_cfg.local_port);
+    LOG_I("server listening on %s:%d", ipstr, g_server_ctx->ls_sfg.port);
     uv_freeaddrinfo(res);
 
     char *user = req->data;
@@ -286,7 +287,7 @@ void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res)
     return;
   }
 
-  LOG_E("failed to bind on local_port: %d", g_server_ctx->server_cfg.local_port);
+  LOG_E("failed to bind on local_port: %d", g_server_ctx->ls_sfg.port);
   exit(1);
 } 
 
