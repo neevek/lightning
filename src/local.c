@@ -47,7 +47,7 @@ typedef struct {
 
 static ServerContext *g_server_ctx;
 static uv_loop_t *g_loop;
-static LocalServerCliCfg g_cli_cfg;
+static LocalServerCliCfg g_cli_cfg = { 0 };
 
 static void start_server(int argc, const char *argv[]);
 static void do_bind_and_listen(uv_getaddrinfo_t* req, int status, 
