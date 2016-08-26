@@ -47,6 +47,7 @@ typedef struct {
 
 static ServerContext *g_server_ctx;
 static uv_loop_t *g_loop;
+static LocalServerCliCfg g_cli_cfg;
 
 static void start_server(int argc, const char *argv[]);
 static void do_bind_and_listen(uv_getaddrinfo_t* req, int status, 
@@ -118,32 +119,10 @@ int main(int argc, const char *argv[]) {
 }
 
 void start_server(int argc, const char *argv[]) {
-  char *local_host;
-  int local_port;
-  char *remote_host;
-  int remote_port;
-  char *cipher_name;
-  char *cipher_secret;
-  char *user;
-  char *log_file;
-  int daemon_flag;
+  handle_local_server_args(argc, argv, &g_cli_cfg);
 
-  handle_local_server_args(
-      argc,
-      argv,
-      &local_host,
-      &local_port,
-      &remote_host,
-      &remote_port,
-      &cipher_name,
-      &cipher_secret,
-      &user,
-      &log_file,
-      &daemon_flag
-      );
-
-  int log_to_file = !!log_file;
-  if (daemon_flag) {
+  int log_to_file = !!g_cli_cfg.log_file;
+  if (g_cli_cfg.daemon_flag) {
     if(daemon(0, 0) == -1 && errno != 0) {
       LOG_E("failed to put the process in background: %s", strerror(errno));
     } else {
@@ -152,7 +131,8 @@ void start_server(int argc, const char *argv[]) {
     }
   }
   if (log_to_file) {
-    redirect_stderr_to_file(log_file ? log_file : "/tmp/lightning_local.log");
+    redirect_stderr_to_file(g_cli_cfg.log_file ?
+        g_cli_cfg.log_file : "/tmp/lightning_local.log");
   }
 
   g_loop = uv_default_loop();
@@ -161,19 +141,19 @@ void start_server(int argc, const char *argv[]) {
   memset(&server_ctx, 0, sizeof(ServerContext));
   g_server_ctx = &server_ctx;
 
-  server_ctx.ls_sfg.host = local_host;
-  server_ctx.ls_sfg.port = local_port;
+  server_ctx.ls_sfg.host = g_cli_cfg.local_host;
+  server_ctx.ls_sfg.port = g_cli_cfg.local_port;
   server_ctx.ls_sfg.backlog = SERVER_BACKLOG;
 
-  server_ctx.rs_cfg.cipher_name = cipher_name;
-  server_ctx.rs_cfg.cipher_secret = cipher_secret;
-  server_ctx.rs_cfg.host = remote_host;
-  server_ctx.rs_cfg.port = remote_port;
+  server_ctx.rs_cfg.cipher_name = g_cli_cfg.cipher_name;
+  server_ctx.rs_cfg.cipher_secret = g_cli_cfg.cipher_secret;
+  server_ctx.rs_cfg.host = g_cli_cfg.remote_host;
+  server_ctx.rs_cfg.port = g_cli_cfg.remote_port;
 
   // used after local host is resolved and bound a port. 
   // The reason we do setuid after binding on local port is that the local port
   // may be under 1024, which requires root permission
-  server_ctx.ls_addrinfo_req.data = user;
+  server_ctx.ls_addrinfo_req.data = &g_cli_cfg;
 
   cipher_global_init();
 
@@ -185,7 +165,7 @@ void start_server(int argc, const char *argv[]) {
   CHECK(uv_getaddrinfo(g_loop, 
                        &g_server_ctx->rs_addrinfo_req, 
                        on_remote_host_resolved, 
-                       remote_host, 
+                       g_cli_cfg.remote_host, 
                        NULL, 
                        &hint) == 0);
 
@@ -280,9 +260,9 @@ void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res)
     LOG_I("server listening on %s:%d", ipstr, g_server_ctx->ls_sfg.port);
     uv_freeaddrinfo(res);
 
-    char *user = req->data;
-    if (user) {
-      do_setuid(user);
+    LocalServerCliCfg *g_cli_cfg = req->data;
+    if (g_cli_cfg->user) {
+      do_setuid(g_cli_cfg->user);
     }
     return;
   }
@@ -1032,12 +1012,30 @@ void upstream_tcp_connect_log(Session *sess, int status) {
 
 int upstream_tcp_connect(uv_connect_t *req, struct sockaddr *addr) {
   TCPSession *sess = container_of(req, TCPSession, upstream_connect_req);
-
   int err;
   if ((err = uv_tcp_connect(req, sess->upstream_tcp, (struct sockaddr *)addr, 
           upstream_tcp_connect_cb)) != 0) {
     LOG_W("uv_tcp_connect failed: %s", uv_strerror(err));
   }
+
+  if (g_cli_cfg.window_size > 0) {
+    uv_os_fd_t client_tcp_fd;
+    if (uv_fileno((uv_handle_t *)sess->upstream_tcp, &client_tcp_fd) == UV_EBADF) {
+      LOG_W("uv_fileno failed on tcp_handle");
+    } else {
+      if (setsockopt(client_tcp_fd, SOL_SOCKET, SO_SNDBUF,
+            &g_cli_cfg.window_size, sizeof(g_cli_cfg.window_size)) != -1 &&
+          setsockopt(client_tcp_fd, SOL_SOCKET, SO_RCVBUF,
+            &g_cli_cfg.window_size, sizeof(g_cli_cfg.window_size)) != -1) {
+        LOG_I("TCP window size set to %d", g_cli_cfg.window_size);
+
+      } else {
+        LOG_W("setting TCP window size failed: %s", strerror(errno));
+      }
+    }
+  }
+
+
   return err;
 }
 

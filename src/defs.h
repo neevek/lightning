@@ -2,12 +2,11 @@
 #define DEFS_H_
 #include <uv.h>
 #include "encrypt.h"
+#include "socks5.h"
 
 #define SESSION_TCP_BUFSIZ 8192
 #define SESSION_UDP_BUFSIZ 4096
 #define DEFAULT_CIPHER_NAME "aes-256-cfb"
-
-struct Socks5Ctx;
 
 typedef enum {
   S5_METHOD_IDENTIFICATION,
@@ -68,5 +67,29 @@ typedef struct {
   uv_udp_send_t client_udp_send_req;
   uv_getaddrinfo_t client_udp_addrinfo_req;
 } UDPSession;
+
+typedef struct {
+  char *local_host;
+  int local_port;
+  char *cipher_name;
+  char *cipher_secret;
+  char *user;
+  char *log_file;
+  int window_size;
+  int daemon_flag;
+} RemoteServerCliCfg;
+
+typedef struct {
+  char *local_host;
+  int local_port;
+  char *remote_host;
+  int remote_port;
+  char *cipher_name;
+  char *cipher_secret;
+  char *user;
+  char *log_file;
+  int window_size;
+  int daemon_flag;
+} LocalServerCliCfg;
 
 #endif /* end of include guard: DEFS_H_ */

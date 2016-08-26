@@ -104,28 +104,11 @@ int main(int argc, const char *argv[]) {
 }
 
 void start_server(int argc, const char *argv[]) {
-  char *local_host;
-  int local_port;
-  char *cipher_name;
-  char *cipher_secret;
-  char *user;
-  char *log_file;
-  int daemon_flag;
+  RemoteServerCliCfg cli_cfg = { 0 };
+  handle_remote_server_args(argc, argv, &cli_cfg);
 
-  handle_remote_server_args(
-      argc,
-      argv,
-      &local_host,
-      &local_port,
-      &cipher_name,
-      &cipher_secret,
-      &user,
-      &log_file,
-      &daemon_flag
-      );
-
-  int log_to_file = !!log_file;
-  if (daemon_flag) {
+  int log_to_file = !!cli_cfg.log_file;
+  if (cli_cfg.daemon_flag) {
     if(daemon(0, 0) == -1 && errno != 0) {
       LOG_E("failed to put the process in background: %s", strerror(errno));
     } else {
@@ -134,7 +117,8 @@ void start_server(int argc, const char *argv[]) {
     }
   }
   if (log_to_file) {
-    redirect_stderr_to_file(log_file ? log_file : "/tmp/lightning_local.log");
+    redirect_stderr_to_file(cli_cfg.log_file ?
+        cli_cfg.log_file : "/tmp/lightning_local.log");
   }
 
   g_loop = uv_default_loop();
@@ -143,14 +127,14 @@ void start_server(int argc, const char *argv[]) {
   memset(&server_ctx, 0, sizeof(ServerContext));
   g_server_ctx = &server_ctx;
 
-  server_ctx.server_cfg.host = local_host;
-  server_ctx.server_cfg.local_port = local_port;
+  server_ctx.server_cfg.host = cli_cfg.local_host;
+  server_ctx.server_cfg.local_port = cli_cfg.local_port;
   server_ctx.server_cfg.backlog = SERVER_BACKLOG;
 
   // hardcode the server and port for testing 
   cipher_global_init();
-  server_ctx.rs_cfg.cipher_name = cipher_name;
-  server_ctx.rs_cfg.cipher_secret = cipher_secret;
+  server_ctx.rs_cfg.cipher_name = cli_cfg.cipher_name;
+  server_ctx.rs_cfg.cipher_secret = cli_cfg.cipher_secret;
 
   struct addrinfo hint;
   memset(&hint, 0, sizeof(hint));
@@ -158,11 +142,11 @@ void start_server(int argc, const char *argv[]) {
   hint.ai_socktype = SOCK_STREAM;
   hint.ai_protocol = IPPROTO_TCP;
 
-  server_ctx.addrinfo_req.data = user;
+  server_ctx.addrinfo_req.data = &cli_cfg;
   CHECK(uv_getaddrinfo(g_loop, 
                        &server_ctx.addrinfo_req, 
                        do_bind_and_listen, 
-                       local_host, 
+                       cli_cfg.local_host, 
                        NULL, 
                        &hint) == 0);
 
@@ -186,7 +170,8 @@ void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res)
   char ipstr[INET6_ADDRSTRLEN];
 
   for (struct addrinfo *ai = res; ai != NULL; ai = ai->ai_next) {
-    if (fill_ipaddr((struct sockaddr *)&addr, htons(g_server_ctx->server_cfg.local_port), 
+    if (fill_ipaddr((struct sockaddr *)&addr,
+          htons(g_server_ctx->server_cfg.local_port), 
           ipstr, sizeof(ipstr), ai) != 0) {
       continue;
     }
@@ -210,6 +195,27 @@ void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res)
       continue;
     }
 
+
+    RemoteServerCliCfg *cli_cfg = req->data;
+    if (cli_cfg->window_size > 0) {
+      uv_os_fd_t server_tcp_fd;
+      if (uv_fileno((uv_handle_t *)&g_server_ctx->server_tcp,
+            &server_tcp_fd) == UV_EBADF) {
+        LOG_W("uv_fileno failed on server_tcp");
+      } else {
+        if (setsockopt(server_tcp_fd, SOL_SOCKET, SO_SNDBUF,
+              &cli_cfg->window_size, sizeof(cli_cfg->window_size)) != -1 &&
+            setsockopt(server_tcp_fd, SOL_SOCKET, SO_RCVBUF,
+              &cli_cfg->window_size, sizeof(cli_cfg->window_size)) != -1) {
+          LOG_I("TCP window size set to %d", cli_cfg->window_size);
+
+        } else {
+          LOG_W("setting TCP window size failed: %s", strerror(errno));
+        }
+      }
+    }
+
+
     if ((err = uv_listen((uv_stream_t *)&g_server_ctx->server_tcp, 
           g_server_ctx->server_cfg.backlog, 
           on_connection_new)) != 0) {
@@ -221,9 +227,8 @@ void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res)
     LOG_I("server listening on %s:%d", ipstr, g_server_ctx->server_cfg.local_port);
     uv_freeaddrinfo(res);
 
-    char *user = req->data;
-    if (user) {
-      do_setuid(user);
+    if (cli_cfg->user) {
+      do_setuid(cli_cfg->user);
     }
     return;
   }
