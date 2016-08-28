@@ -1023,18 +1023,15 @@ int upstream_tcp_connect(uv_connect_t *req, struct sockaddr *addr) {
     if (uv_fileno((uv_handle_t *)sess->upstream_tcp, &client_tcp_fd) == UV_EBADF) {
       LOG_W("uv_fileno failed on tcp_handle");
     } else {
-      if (setsockopt(client_tcp_fd, SOL_SOCKET, SO_SNDBUF,
-            &g_cli_cfg.window_size, sizeof(g_cli_cfg.window_size)) != -1 &&
-          setsockopt(client_tcp_fd, SOL_SOCKET, SO_RCVBUF,
+      if (setsockopt(client_tcp_fd, SOL_SOCKET, SO_RCVBUF,
             &g_cli_cfg.window_size, sizeof(g_cli_cfg.window_size)) != -1) {
-        LOG_I("TCP window size set to %d", g_cli_cfg.window_size);
+        LOG_I("TCP SO_RCVBUF set to %d", g_cli_cfg.window_size);
 
       } else {
-        LOG_W("setting TCP window size failed: %s", strerror(errno));
+        LOG_W("setting TCP SO_RCVBUF failed: %s", strerror(errno));
       }
     }
   }
-
 
   return err;
 }
