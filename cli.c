@@ -19,6 +19,9 @@ void local_server_usage(const char *cmd, int exit_code) {
       "    -l, --log_file      path to log file, stderr if absent\n"
       "    -w, --window_size   tcp window size in bytes\n"
       "    -D, --daemon        run the process in the background\n"
+      "    -g, --pac_file_url  MacOS only, specify the PAC file, when used, -G, --set_system_proxy will be ignored\n"
+      "    -G, --set_system_proxy\n"
+      "                        MacOS only, setup system SOCKS5 proxy\n"
       "    --help          print this help message\n"
       , cmd);
   exit(exit_code);
@@ -124,23 +127,25 @@ void handle_local_server_args(
     int argc, const char **argv, LocalServerCliCfg *cfg) {
 
   static struct option long_options[] = {
-    {"help",          no_argument,       0, 1},
-    {"local_host",    required_argument, 0, 'h'},
-    {"local_port",    required_argument, 0, 'p'},
-    {"remote_host",   required_argument, 0, 'H'},
-    {"remote_port",   required_argument, 0, 'P'},
-    {"cipher_name",   required_argument, 0, 'c'},
-    {"cipher_secret", required_argument, 0, 's'},
-    {"user",          required_argument, 0, 'u'},
-    {"log_file",      required_argument, 0, 'l'},
-    {"window_size",   required_argument, 0, 'w'},
-    {"daemon",        no_argument,       0, 'D'},
+    {"help",             no_argument,       0, 1},
+    {"local_host",       required_argument, 0, 'h'},
+    {"local_port",       required_argument, 0, 'p'},
+    {"remote_host",      required_argument, 0, 'H'},
+    {"remote_port",      required_argument, 0, 'P'},
+    {"cipher_name",      required_argument, 0, 'c'},
+    {"cipher_secret",    required_argument, 0, 's'},
+    {"user",             required_argument, 0, 'u'},
+    {"log_file",         required_argument, 0, 'l'},
+    {"window_size",      required_argument, 0, 'w'},
+    {"daemon",           no_argument,       0, 'D'},
+    {"set_global_proxy", no_argument,       0, 'G'},
+    {"pac_file_url",     required_argument, 0, 'g'},
     {0, 0, 0, 0}
   };
 
   int optind = 0;
   char c;
-  while((c = getopt_long(argc, (char **)argv, "h:p:H:P:c:s:u:l:w:D",
+  while((c = getopt_long(argc, (char **)argv, "h:p:H:P:c:s:u:l:w:DGg:",
           long_options, &optind)) != -1) {
     switch(c) {
       case 0:
@@ -181,6 +186,20 @@ void handle_local_server_args(
         break;
       case 'D':
         cfg->daemon_flag = 1;
+        break;
+      case 'G':
+#ifdef __APPLE__
+        cfg->set_global_proxy = 1;
+#else
+        fprintf(stderr, "<-G, --set_global_proxy> is for MacOS only.");
+#endif
+        break;
+      case 'g':
+#ifdef __APPLE__
+        cfg->pac_file_url = optarg;
+#else
+        fprintf(stderr, "<-g, --pac_file_url> is for MacOS only.");
+#endif
         break;
       default:
         local_server_usage(argv[0], 1);

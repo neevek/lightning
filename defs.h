@@ -90,6 +90,10 @@ typedef struct {
   char *log_file;
   int window_size;
   int daemon_flag;
+  int set_global_proxy; 
+  // if pac_file_url is not NULL, it will be used and
+  // use_global_proxy will be ignored 
+  char *pac_file_url; 
 } LocalServerCliCfg;
 
 #endif /* end of include guard: DEFS_H_ */

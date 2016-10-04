@@ -11,6 +11,10 @@
 #include "encrypt.h"
 #include "cli.h"
 
+#ifdef __APPLE__
+#include "proxy_config.h"
+#endif
+
 #define SERVER_BACKLOG 256
 #define KEEPALIVE 60
 
@@ -121,18 +125,28 @@ int main(int argc, const char *argv[]) {
 void start_server(int argc, const char *argv[]) {
   handle_local_server_args(argc, argv, &g_cli_cfg);
 
-  int log_to_file = !!g_cli_cfg.log_file;
+  if (g_cli_cfg.log_file || g_cli_cfg.daemon_flag) {
+    redirect_stderr_to_file(g_cli_cfg.log_file ?
+        g_cli_cfg.log_file : "/tmp/lightning_local.log");
+  }
+
+#ifdef __APPLE__
+  // a little bit early to set proxy here, but I must do it before
+  // entering background with daemon(), otherwise authorization request
+  // will not be initiated, and "set proxy" will silently fail.
+  if (g_cli_cfg.pac_file_url) {
+    LOG_I("set pac_file_url: %s", g_cli_cfg.pac_file_url);
+    set_proxy_with_pac_file_url(g_cli_cfg.pac_file_url);
+  } else if (g_cli_cfg.set_global_proxy) {
+    LOG_I("set_global_proxy");
+    set_global_proxy(g_cli_cfg.local_host, g_cli_cfg.local_port);
+  }
+#endif
+
   if (g_cli_cfg.daemon_flag) {
     if(daemon(0, 0) == -1 && errno != 0) {
       LOG_E("failed to put the process in background: %s", strerror(errno));
-    } else {
-      // when in background, write log to a file
-      log_to_file = 1;
     }
-  }
-  if (log_to_file) {
-    redirect_stderr_to_file(g_cli_cfg.log_file ?
-        g_cli_cfg.log_file : "/tmp/lightning_local.log");
   }
 
   g_loop = uv_default_loop();
@@ -264,6 +278,7 @@ void do_bind_and_listen(uv_getaddrinfo_t* req, int status, struct addrinfo* res)
     if (g_cli_cfg->user) {
       do_setuid(g_cli_cfg->user);
     }
+
     return;
   }
 
