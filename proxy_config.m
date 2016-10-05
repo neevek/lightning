@@ -53,11 +53,12 @@ int set_global_proxy(const char *host, int port) {
 }
 
 int set_proxy_with_pac_file_url(const char *pac_file_url) {
+  NSString *url = [NSString stringWithUTF8String: pac_file_url];
+  url = [[url stringByExpandingTildeInPath] stringByStandardizingPath];
+  if ([url hasPrefix:@"/"]) {
+       url = [@"file://" stringByAppendingString:url];
+  }
   return set_proxy(^() { 
-      NSString *url = [NSString stringWithUTF8String: pac_file_url];
-      if ([url hasPrefix:@"/"]) {
-        url = [@"file://" stringByAppendingString:url];
-      }
       NSMutableDictionary *proxyConfigDict = [[NSMutableDictionary alloc] init];
       [proxyConfigDict setObject:url
                           forKey:(NSString *)kCFNetworkProxiesProxyAutoConfigURLString];
