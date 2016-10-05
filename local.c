@@ -10,9 +10,9 @@
 #include "defs.h"
 #include "encrypt.h"
 #include "cli.h"
-#include "sig_handler.h"
 
 #ifdef __APPLE__
+#include "sig_handler.h"
 #include "proxy_config.h"
 #endif
 
