@@ -10,6 +10,7 @@
 #include "defs.h"
 #include "encrypt.h"
 #include "cli.h"
+#include "sig_handler.h"
 
 #ifdef __APPLE__
 #include "proxy_config.h"
@@ -125,6 +126,7 @@ int main(int argc, const char *argv[]) {
 void start_server(int argc, const char *argv[]) {
   handle_local_server_args(argc, argv, &g_cli_cfg);
 
+  register_sig_handlers();
   if (g_cli_cfg.log_file || g_cli_cfg.daemon_flag) {
     redirect_stderr_to_file(g_cli_cfg.log_file ?
         g_cli_cfg.log_file : "/tmp/lightning_local.log");

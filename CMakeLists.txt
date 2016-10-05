@@ -5,7 +5,7 @@ project(lightning)
 set(CMAKE_C_FLAGS "-O2 -DLOG_VERBOSE -std=c99 -D_GNU_SOURCE -Wno-deprecated-declarations -DNO_TERM_COLOR")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-set(SRCS_FOR_LOCAL alloc.c local.c socks5.c util.c encrypt.c cli.c)
+set(SRCS_FOR_LOCAL alloc.c local.c socks5.c util.c encrypt.c cli.c sig_handler.c)
 set(SRCS_FOR_REMOTE alloc.c remote.c socks5.c util.c encrypt.c cli.c)
 
 IF(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
