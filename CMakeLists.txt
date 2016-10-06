@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 2.8.9)
-project(lightning)
+set (CMAKE_INSTALL_PREFIX /usr/local)
 
 #set(CMAKE_C_FLAGS "-Wall -O0 -g -DLOG_VERBOSE -std=c99 -D_GNU_SOURCE -Wno-deprecated-declarations -DNO_TERM_COLOR")
 set(CMAKE_C_FLAGS "-O2 -DLOG_VERBOSE -std=c99 -D_GNU_SOURCE -Wno-deprecated-declarations -DNO_TERM_COLOR")
@@ -24,3 +24,5 @@ add_executable(lightning_remote ${SRCS_FOR_REMOTE})
 
 target_link_libraries(lightning_local uv crypto ssl ${EXTRA_LIBS})
 target_link_libraries(lightning_remote uv crypto ssl)
+
+install(TARGETS lightning_local lightning_remote DESTINATION /usr/local/bin)
