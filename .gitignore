@@ -1,6 +1,6 @@
 *.o
 a.out
-lightning
+lightning_local
 lightning_remote
 bin/
 build/

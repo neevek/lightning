@@ -19,8 +19,8 @@ IF(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
   SET(EXTRA_LIBS ${FOUNDATION_LIB} ${SYSTEM_CONFIGURATION_LIB} ${CF_NETWORK_LIB} ${SECURITY_LIB})
 ENDIF()
 
-add_executable(lightning ${SRCS_FOR_LOCAL})
+add_executable(lightning_local ${SRCS_FOR_LOCAL})
 add_executable(lightning_remote ${SRCS_FOR_REMOTE})
 
-target_link_libraries(lightning uv crypto ssl ${EXTRA_LIBS})
+target_link_libraries(lightning_local uv crypto ssl ${EXTRA_LIBS})
 target_link_libraries(lightning_remote uv crypto ssl)
