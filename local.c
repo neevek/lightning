@@ -126,7 +126,10 @@ int main(int argc, const char *argv[]) {
 void start_server(int argc, const char *argv[]) {
   handle_local_server_args(argc, argv, &g_cli_cfg);
 
+#ifdef __APPLE__
   register_sig_handlers();
+#endif
+
   if (g_cli_cfg.log_file || g_cli_cfg.daemon_flag) {
     redirect_stderr_to_file(g_cli_cfg.log_file ?
         g_cli_cfg.log_file : "/tmp/lightning_local.log");
