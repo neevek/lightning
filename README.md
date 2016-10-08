@@ -1,6 +1,6 @@
 Description
 ===========
-**lightning** are two programs to build a secure tunnel between remote host
+**lightning** are two programs that build a secure tunnel between remote host
 and local host. **lightning_local** implements the SOCKS5 protocol with payload
 encryption. **lightning_remote** is a stream server sits at the remote end of
 the tunnel.
