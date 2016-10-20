@@ -645,74 +645,16 @@ void handle_socks5_request(uv_stream_t *handle, ssize_t nread,
     return;
   }
 
-  // REMOTE connect
-  if (1) {
-    sess->socks5_req_data_len = nread;
-    sess->socks5_req_data = stream_encrypt(&sess->e_ctx, buf->base, 
-        &sess->socks5_req_data_len, 0);
+  // connect to REMOTE to build a tunnel
+  sess->socks5_req_data_len = nread;
+  sess->socks5_req_data = stream_encrypt(&sess->e_ctx, buf->base, 
+      &sess->socks5_req_data_len, 0);
 
-    int err = upstream_tcp_connect(&((TCPSession *)sess)->upstream_connect_req, 
-        (struct sockaddr *)&g_server_ctx->rs_cfg.addr);
-    if (err != 0) {
-      LOG_E("connecting to remote server failed: %s", uv_strerror(err));
-      client_tcp_write_error((uv_stream_t *)sess->client_tcp, err); 
-    }
-
-    return;
-  }
-
-  if (s5_ctx->atyp == S5_ATYP_IPV4) {
-    struct sockaddr_in addr4;
-    addr4.sin_family = AF_INET;
-    addr4.sin_port = htons(s5_ctx->dst_port);
-    memcpy(&addr4.sin_addr.s_addr, s5_ctx->dst_addr, 4);
-
-    int err;
-    if ((err = upstream_tcp_connect(&((TCPSession *)sess)->upstream_connect_req, 
-            (struct sockaddr *)&addr4)) != 0) {
-      log_ipv4_and_port(s5_ctx->dst_addr, s5_ctx->dst_port, 
-          "upstream connect failed");
-      client_tcp_write_error((uv_stream_t *)sess->client_tcp, err); 
-    }
-
-  } else if (s5_ctx->atyp == S5_ATYP_DOMAIN) {
-    struct addrinfo hint;
-    memset(&hint, 0, sizeof(hint));
-    hint.ai_family = AF_UNSPEC;
-    hint.ai_socktype = SOCK_STREAM;
-    hint.ai_protocol = IPPROTO_TCP;
-
-    int err;
-    if ((err = uv_getaddrinfo(g_loop, 
-            &((TCPSession *)sess)->upstream_addrinfo_req, 
-            upstream_tcp_connect_domain, 
-            (const char *)s5_ctx->dst_addr, 
-            NULL, 
-            &hint)) < 0) {
-
-      LOG_E("uv_getaddrinfo failed: %s, err: %s", 
-          s5_ctx->dst_addr, uv_strerror(err));
-      client_tcp_write_error(handle, err);
-      return;
-    }
-
-  } else if (s5_ctx->atyp == S5_ATYP_IPV6) {
-    struct sockaddr_in6 addr6;
-    addr6.sin6_family = AF_INET6;
-    addr6.sin6_port = htons(s5_ctx->dst_port);
-    memcpy(addr6.sin6_addr.s6_addr, s5_ctx->dst_addr, 16);
-
-    int err;
-    if ((err = upstream_tcp_connect(&((TCPSession *)sess)->upstream_connect_req, 
-            (struct sockaddr *)&addr6)) != 0) {
-      log_ipv6_and_port(s5_ctx->dst_addr, s5_ctx->dst_port, 
-          "upstream connect failed");
-      client_tcp_write_error((uv_stream_t *)sess->client_tcp, err); 
-    }
-
-  } else {
-    LOG_E("unknown ATYP: %d", s5_ctx->atyp);
-    client_tcp_write_error(handle, 20000);  // the error code is chosen at random
+  err = upstream_tcp_connect(&((TCPSession *)sess)->upstream_connect_req, 
+      (struct sockaddr *)&g_server_ctx->rs_cfg.addr);
+  if (err != 0) {
+    LOG_E("connecting to remote server failed: %s", uv_strerror(err));
+    client_tcp_write_error((uv_stream_t *)sess->client_tcp, err); 
   }
 }
 
